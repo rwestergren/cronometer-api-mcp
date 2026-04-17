@@ -30,5 +30,10 @@ dependencies = [
 [project.scripts]
 cronometer-api-mcp = "cronometer_api_mcp.server:main"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/cronometer_api_mcp"]

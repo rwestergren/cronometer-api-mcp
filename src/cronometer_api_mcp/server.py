@@ -911,8 +911,6 @@ class OAuthAuthorizationMiddleware:
         grant_type = params.get("grant_type", [None])[0]
         code = params.get("code", [None])[0]
         code_verifier = params.get("code_verifier", [None])[0]
-        client_id = params.get("client_id", [None])[0]
-        client_secret = params.get("client_secret", [None])[0]
 
         if grant_type != "authorization_code":
             response = JSONResponse(
