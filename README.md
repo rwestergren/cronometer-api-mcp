@@ -4,7 +4,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for [Cronometer](https://cronometer.com/) nutrition tracking, built on the reverse-engineered mobile REST API.
 
-Unlike [cronometer-mcp](https://github.com/cphoskins/cronometer-mcp) which uses the fragile GWT-RPC web protocol (with magic hashes that break on every Cronometer deploy), this server uses the same JSON API that the Cronometer Android app uses -- clean payloads, stable endpoints, no permutation hashes.
+Unlike [cronometer-mcp](https://github.com/cphoskins/cronometer-mcp), which takes a comprehensive GWT-RPC approach against Cronometer's web backend, this server talks to the same JSON REST API used by the Cronometer Android app -- with clean payloads and stable, versioned endpoints.
 
 ## Features
 
