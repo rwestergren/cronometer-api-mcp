@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rwestergren/cronometer-api-mcp",
-  "description": "MCP server for Cronometer nutrition tracking via the mobile REST API — food logs, nutrition scores, diary management, macros, fasting",
+  "description": "MCP server for Cronometer nutrition tracking — food logs, diary, macros, fasting",
   "repository": {
     "url": "https://github.com/rwestergren/cronometer-api-mcp",
     "source": "github"
