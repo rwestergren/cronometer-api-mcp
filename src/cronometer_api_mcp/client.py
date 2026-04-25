@@ -387,6 +387,32 @@ class CronometerClient:
         if diary_group == 0:
             diary_group = _meal_group_for_hour(now.hour)
 
+        # Cronometer's backend rejects measureId=0 for database foods
+        # (CRDB / NCCDB / FDC-branded) with a misleading
+        # 'JSONObject["userId"] is not a int (Null)' error. The official
+        # Android client always sends a real measureId; only user-created
+        # custom foods accept measureId=0 / gram-mode logging. When the
+        # caller does not specify a measure, look up the food's
+        # defaultMeasureId via get_food and substitute it so the request
+        # matches what the app would send.
+        if not measure_id:
+            try:
+                food = self.get_food(food_id)
+                default_id = food.get("defaultMeasureId")
+                if default_id:
+                    measure_id = default_id
+                    logger.debug(
+                        "add_serving: using defaultMeasureId=%s for food_id=%s",
+                        default_id,
+                        food_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "add_serving: defaultMeasureId lookup failed (%s); "
+                    "continuing with measureId=0",
+                    exc,
+                )
+
         serving = {
             "order": (diary_group << 16) | 1,
             "day": day_str,
