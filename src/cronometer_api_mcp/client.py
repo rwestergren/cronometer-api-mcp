@@ -371,7 +371,10 @@ class CronometerClient:
 
         Args:
             food_id: Cronometer food ID.
-            measure_id: Measure/unit ID (from get_food). 0 for gram-based.
+            measure_id: Measure/unit ID. Get this from search_food() results
+                        (measureId field) or get_food() (defaultMeasureId or measures[].id).
+                        0 is only valid for user-created custom foods; database-sourced
+                        foods (CRDB/NCCDB/FDC) require a real measure ID.
             grams: Weight in grams.
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
