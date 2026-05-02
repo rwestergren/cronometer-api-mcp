@@ -88,6 +88,18 @@ def get_food_log(date: str | None = None) -> str:
     Returns every food entry logged for the day, including food names,
     amounts, meal groups, and nutrient data.
 
+    Also returns a top-level energy_summary field with pre-computed
+    values most relevant to the user:
+
+      - total_target_kcal: daily calorie target dynamically adjusted
+        for expenditure and weight goal (equivalent to Cronometer's
+        "Total Target" in the Energy Summary screen)
+      - consumed_kcal: total calories consumed
+      - remaining_kcal: calories remaining to stay on target
+        (total_target_kcal - consumed_kcal). Always report this
+        when summarizing the user's day. Prefer this over manually
+        deriving values from the burn breakdown fields.
+
     Args:
         date: Date as YYYY-MM-DD (defaults to today).
     """
@@ -95,9 +107,22 @@ def get_food_log(date: str | None = None) -> str:
         client = _get_client()
         day = _parse_date(date)
         data = client.get_diary(day)
+
+        summary = (data or {}).get("summary") or {}
+        target = (summary.get("macros") or {}).get("energy")
+        consumed = (summary.get("consumed") or {}).get("total")
+        energy_summary: dict | None = None
+        if target is not None and consumed is not None:
+            energy_summary = {
+                "total_target_kcal": target,
+                "consumed_kcal": consumed,
+                "remaining_kcal": int(round(target - consumed)),
+            }
+
         return _ok(
             {
                 "date": date or str(date_module_today()),
+                "energy_summary": energy_summary,
                 "diary": data,
             }
         )
