@@ -157,6 +157,18 @@ When deployed remotely with OAuth configured, connect from Claude.ai using:
 
 Claude.ai will open a browser tab for authorization. Click **Authorize** to complete the connection.
 
+## Development
+
+For local development, copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+cp .env.example .env
+# edit .env
+uv run cronometer-api-mcp
+```
+
+The CLI auto-loads `.env` on startup (dev convenience only). Real environment variables always win over `.env`, so production deployments and MCP client `env` blocks are unaffected.
+
 ## How It Works
 
 This server communicates with `mobile.cronometer.com` -- the same REST API used by the Cronometer Android/Flutter app. The API was reverse-engineered through:

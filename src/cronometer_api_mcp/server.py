@@ -1002,6 +1002,15 @@ class OAuthAuthorizationMiddleware:
 
 
 def main():
+    # Load .env for local development. No-op if the file is missing.
+    # override=False keeps real environment variables (Docker, systemd,
+    # MCP client `env` blocks, etc.) authoritative over .env.
+    from dotenv import find_dotenv, load_dotenv
+
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path and load_dotenv(dotenv_path, override=False):
+        logger.info("Loaded .env from %s", dotenv_path)
+
     transport = os.getenv("MCP_TRANSPORT", "stdio")
 
     if transport == "stdio":
