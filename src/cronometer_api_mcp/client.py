@@ -9,15 +9,26 @@ Frida-based traffic capture that established the auth flow and initial
 endpoints.
 """
 
+import json
 import logging
 import os
 from datetime import date, datetime
+from pathlib import Path
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://mobile.cronometer.com"
+
+# Cache the auth token across processes to avoid /api/v2/login rate limits.
+# Cronometer throttles repeated logins per account; reusing a sessionKey lets
+# short-lived CLI invocations behave like a long-running app.
+_DEFAULT_SESSION_PATH = (
+    Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache")
+    / "cronometer-mcp"
+    / "session.json"
+)
 
 # Auth block sent with every request (mimics the Android app)
 _APP_AUTH_TEMPLATE = {
@@ -52,9 +63,10 @@ class CronometerClient:
     Re-authenticates automatically when the session expires.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, session_path: Path | None = None) -> None:
         self._user_id: int | None = None
         self._token: str | None = None
+        self._session_path: Path = session_path or _DEFAULT_SESSION_PATH
         self._http = httpx.Client(
             base_url=BASE_URL,
             headers={
@@ -64,10 +76,77 @@ class CronometerClient:
             },
             timeout=30.0,
         )
+        self._load_cached_session()
 
     # ------------------------------------------------------------------
     # Authentication
     # ------------------------------------------------------------------
+
+    def _cache_key(self) -> str:
+        """Tie the cached session to the configured username so
+        switching accounts invalidates the cache automatically."""
+        return os.getenv("CRONOMETER_USERNAME", "")
+
+    def _load_cached_session(self) -> None:
+        """Restore (user_id, token) from disk if a cache file exists.
+
+        Silently ignores any read/parse error: the worst case is we
+        re-login, which is the original behaviour.
+        """
+        try:
+            raw = self._session_path.read_text()
+        except (FileNotFoundError, OSError):
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if data.get("username") != self._cache_key():
+            return
+        token = data.get("token")
+        user_id = data.get("user_id")
+        if isinstance(token, str) and isinstance(user_id, int):
+            self._user_id = user_id
+            self._token = token
+            logger.debug(
+                "Restored Cronometer session for user_id=%d from %s",
+                user_id,
+                self._session_path,
+            )
+
+    def _save_cached_session(self) -> None:
+        """Persist (user_id, token) so future processes can reuse it."""
+        if self._user_id is None or self._token is None:
+            return
+        try:
+            self._session_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._session_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "username": self._cache_key(),
+                        "user_id": self._user_id,
+                        "token": self._token,
+                    }
+                )
+            )
+            os.replace(tmp, self._session_path)
+            try:
+                os.chmod(self._session_path, 0o600)
+            except OSError:
+                pass
+        except OSError as exc:
+            logger.warning("Failed to persist Cronometer session: %s", exc)
+
+    def _invalidate_session(self) -> None:
+        """Drop the in-memory token and remove the cache file."""
+        self._token = None
+        try:
+            self._session_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.debug("Could not remove cached session: %s", exc)
 
     def _get_credentials(self) -> tuple[str, str]:
         username = os.getenv("CRONOMETER_USERNAME")
@@ -113,6 +192,7 @@ class CronometerClient:
 
         self._user_id = data["id"]
         self._token = data["sessionKey"]
+        self._save_cached_session()
         logger.info(
             "Cronometer login successful (userId=%d, token=%s...)",
             self._user_id,
@@ -151,7 +231,7 @@ class CronometerClient:
                 "Cronometer auth rejected (%d), re-authenticating",
                 resp.status_code,
             )
-            self._token = None
+            self._invalidate_session()
             self.login()
             return self._request(endpoint, payload, _retried=True)
 
@@ -209,7 +289,7 @@ class CronometerClient:
                 "Cronometer v3 auth rejected (%d), re-authenticating",
                 resp.status_code,
             )
-            self._token = None
+            self._invalidate_session()
             self.login()
             return self._request_v3(method, path, json_body=json_body, _retried=True)
 
