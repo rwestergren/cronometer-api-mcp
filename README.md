@@ -2,6 +2,13 @@
 
 <!-- mcp-name: io.github.rwestergren/cronometer-api-mcp -->
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/rwestergren/cronometer-api-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rwestergren/cronometer-api-mcp/actions/workflows/ci.yml)
+[![Build Docker image](https://github.com/rwestergren/cronometer-api-mcp/actions/workflows/docker.yml/badge.svg)](https://github.com/rwestergren/cronometer-api-mcp/actions/workflows/docker.yml)
+[![PyPI](https://img.shields.io/pypi/v/cronometer-api-mcp.svg)](https://pypi.org/project/cronometer-api-mcp/)
+
+> **Hosted version for Claude.ai, ChatGPT, and Grok coming soon.** [**Join the waitlist →**](https://tally.so/r/A7WVge?ref=cronometer-api-mcp)
+
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for [Cronometer](https://cronometer.com/) nutrition tracking, built on the reverse-engineered mobile REST API.
 
 Unlike [cronometer-mcp](https://github.com/cphoskins/cronometer-mcp), which takes a comprehensive GWT-RPC approach against Cronometer's web backend, this server talks to the same JSON REST API used by the Cronometer Android app -- with clean payloads and stable, versioned endpoints.
