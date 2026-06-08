@@ -100,6 +100,14 @@ def get_food_log(date: str | None = None) -> str:
         when summarizing the user's day. Prefer this over manually
         deriving values from the burn breakdown fields.
 
+    Also returns a nutrition_summary field with consumed totals for every
+    nutrient the user tracks in Cronometer (macros plus any tracked
+    micronutrients such as saturated fat, cholesterol, or omega-3/6):
+
+      - macros: flat macro totals (energy, protein, carbs, net_carbs, fat,
+        fiber, alcohol)
+      - nutrients: the full list of tracked nutrients with amounts and units
+
     Args:
         date: Date as YYYY-MM-DD (defaults to today).
     """
@@ -119,10 +127,13 @@ def get_food_log(date: str | None = None) -> str:
                 "remaining_kcal": int(round(target - consumed)),
             }
 
+        nutrition_summary = client.get_consumed_nutrients(day)
+
         return _ok(
             {
                 "date": date or str(date_module_today()),
                 "energy_summary": energy_summary,
+                "nutrition_summary": nutrition_summary,
                 "diary": data,
             }
         )
@@ -318,10 +329,19 @@ def copy_day(date: str | None = None) -> str:
     }
 )
 def get_daily_nutrition(date: str | None = None) -> str:
-    """Get daily nutrition summary with macro and micronutrient totals.
+    """Get daily nutrition summary with consumed macro and micronutrient totals.
 
-    Returns calorie, protein, carb, fat, fiber totals and micronutrients
-    for the given day.
+    Returns the amounts actually consumed for the day, covering every nutrient
+    the user tracks in Cronometer (i.e. has a target set for). The response has:
+
+      - summary: flat macro totals (energy, protein, carbs, net_carbs, fat,
+        fiber, alcohol). A value is null if that macro isn't tracked.
+      - nutrients: the full list of tracked nutrients, each with id, name,
+        amount, unit, category, and confidence.
+
+    A nutrient only appears if it's tracked in Cronometer. To surface e.g.
+    saturated fat, cholesterol, or trans fat, set a target for it in Cronometer
+    and it will flow through automatically.
 
     Args:
         date: Date as YYYY-MM-DD (defaults to today).
@@ -329,11 +349,12 @@ def get_daily_nutrition(date: str | None = None) -> str:
     try:
         client = _get_client()
         day = _parse_date(date)
-        data = client.get_nutrients(day)
+        data = client.get_consumed_nutrients(day)
         return _ok(
             {
                 "date": date or str(date_module_today()),
-                "nutrients": data,
+                "summary": data["macros"],
+                "nutrients": data["nutrients"],
             }
         )
     except Exception as e:

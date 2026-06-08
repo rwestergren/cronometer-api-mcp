@@ -38,6 +38,24 @@ NUTRIENT_IDS = {
     "sodium": 307,
     "alcohol": 221,
     "net_carbs": -1205,
+    "saturated_fat": 606,
+    "cholesterol": 601,
+    "trans_fat": 605,
+    "omega_3": 10001,
+    "omega_6": 10002,
+}
+
+# Macro fields surfaced as a flat convenience block in the daily summary,
+# mapped to their nutrient IDs. These are the values most relevant when
+# summarizing a day at a glance.
+SUMMARY_MACRO_IDS = {
+    "energy": 208,
+    "protein": 203,
+    "carbs": 205,
+    "net_carbs": -1205,
+    "fat": 204,
+    "fiber": 291,
+    "alcohol": 221,
 }
 
 
@@ -55,6 +73,9 @@ class CronometerClient:
     def __init__(self) -> None:
         self._user_id: int | None = None
         self._token: str | None = None
+        # Cache of nutrient definitions (id -> {name, unit, category}).
+        # Definitions are stable for an account, so fetch them once.
+        self._nutrient_defs: dict[int, dict] | None = None
         self._http = httpx.Client(
             base_url=BASE_URL,
             headers={
@@ -617,6 +638,90 @@ class CronometerClient:
             len(serving_ids),
         )
         return data
+
+    def get_nutrient_definitions(self) -> dict[int, dict]:
+        """Get the nutrient definition map (id -> {name, unit, category}).
+
+        The get_nutrients endpoint returns the account's nutrient catalog --
+        names, units, RDIs, and categories -- not consumed amounts. We use it
+        purely to label nutrient IDs. Cached after the first call since the
+        catalog is stable.
+        """
+        if self._nutrient_defs is None:
+            data = self.get_nutrients()
+            defs: dict[int, dict] = {}
+            for n in data.get("nutrients", []):
+                nid = n.get("id")
+                if nid is None:
+                    continue
+                defs[nid] = {
+                    "name": n.get("name"),
+                    "unit": n.get("unit"),
+                    "category": n.get("category"),
+                }
+            self._nutrient_defs = defs
+        return self._nutrient_defs
+
+    def get_consumed_nutrients(self, day: date | None = None) -> dict:
+        """Get consumed nutrient totals for a day, labeled and summarized.
+
+        Builds a clean summary from the server-computed per-nutrient totals in
+        get_nutrition_scores (the "All Targets" category), which reflect exactly
+        the nutrients the user is tracking (i.e. has targets set for). Each
+        nutrient is labeled with its name, unit, and category via the nutrient
+        definition catalog.
+
+        Returns a dict:
+            {
+                "macros": {energy, protein, carbs, net_carbs, fat, fiber,
+                           alcohol},  # flat amounts (None if not tracked)
+                "nutrients": [
+                    {id, name, amount, unit, category, confidence}, ...
+                ],
+            }
+
+        Note: a nutrient only appears if the user tracks it in Cronometer. To
+        see e.g. saturated fat, the user must have a target set for it.
+        """
+        scores = self.get_nutrition_scores(day)
+
+        # The "All Targets" category contains every tracked nutrient.
+        all_targets = next(
+            (c for c in scores.get("scores", []) if c.get("title") == "All Targets"),
+            None,
+        )
+        components = (all_targets or {}).get("components", []) if all_targets else []
+
+        defs = self.get_nutrient_definitions()
+
+        nutrients: list[dict] = []
+        amounts_by_id: dict[int, float] = {}
+        for comp in components:
+            nid = comp.get("nutrientId")
+            if nid is None:
+                continue
+            amount = comp.get("amount")
+            amounts_by_id[nid] = amount
+            meta = defs.get(nid, {})
+            nutrients.append(
+                {
+                    "id": nid,
+                    "name": meta.get("name"),
+                    "amount": amount,
+                    "unit": meta.get("unit"),
+                    "category": meta.get("category"),
+                    "confidence": comp.get("confidence"),
+                }
+            )
+
+        macros = {key: amounts_by_id.get(nid) for key, nid in SUMMARY_MACRO_IDS.items()}
+
+        logger.info(
+            "Built consumed nutrient summary for %s (%d tracked nutrients)",
+            self._format_day(day),
+            len(nutrients),
+        )
+        return {"macros": macros, "nutrients": nutrients}
 
     # ------------------------------------------------------------------
     # Macro targets
