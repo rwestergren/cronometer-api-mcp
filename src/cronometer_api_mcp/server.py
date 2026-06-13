@@ -517,6 +517,7 @@ def add_custom_food(
     fiber_g: float = 0,
     sugar_g: float = 0,
     sodium_mg: float = 0,
+    saturated_fat_g: float = 0,
     serving_name: str = "1 serving",
     serving_grams: float = 100.0,
 ) -> str:
@@ -534,6 +535,7 @@ def add_custom_food(
         fiber_g: Fiber per serving (g, default 0).
         sugar_g: Sugar per serving (g, default 0).
         sodium_mg: Sodium per serving (mg, default 0).
+        saturated_fat_g: Saturated fat per serving (g, default 0).
         serving_name: Name for the serving size (default "1 serving").
         serving_grams: Weight of one serving in grams (default 100).
     """
@@ -548,6 +550,7 @@ def add_custom_food(
             fiber_g=fiber_g,
             sugar_g=sugar_g,
             sodium_mg=sodium_mg,
+            saturated_fat_g=saturated_fat_g,
             serving_name=serving_name,
             serving_grams=serving_grams,
         )
