@@ -332,7 +332,10 @@ class CronometerClient:
             {"id": NUTRIENT_IDS["fiber"], "amount": round(fiber_g * scale, 2)},
             {"id": NUTRIENT_IDS["sugar"], "amount": round(sugar_g * scale, 2)},
             {"id": NUTRIENT_IDS["sodium"], "amount": round(sodium_mg * scale, 2)},
-            {"id": NUTRIENT_IDS["saturated_fat"], "amount": round(saturated_fat_g * scale, 2)},
+            {
+                "id": NUTRIENT_IDS["saturated_fat"],
+                "amount": round(saturated_fat_g * scale, 2),
+            },
             # Derived / calculated fields the app includes
             {"id": -203, "amount": round(protein_g * scale, 2)},
             {"id": -204, "amount": round(fat_g * scale, 2)},
