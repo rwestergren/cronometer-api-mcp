@@ -22,6 +22,7 @@ Unlike [cronometer-mcp](https://github.com/cphoskins/cronometer-mcp), which take
 - **Custom foods** -- create foods with custom nutrition data
 - **Macro targets** -- read weekly schedule and saved templates
 - **Fasting** -- view history and aggregate statistics
+- **Biometrics** -- weight, body fat, heart rate, and other tracked metrics over a date range
 
 ## Quick Start
 
@@ -112,6 +113,8 @@ export CRONOMETER_PASSWORD="your-password"
 | `get_macro_targets` | Weekly macro schedule and saved target templates |
 | `get_fasting_history` | Fasting history within a date range |
 | `get_fasting_stats` | Aggregate fasting statistics |
+| `list_biometrics` | List trackable biometric metrics and their units |
+| `get_biometrics` | Biometric time series (e.g. weight, body fat) within a date range |
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
@@ -186,7 +189,7 @@ This server communicates with `mobile.cronometer.com` -- the same REST API used 
 
 The API uses two protocols:
 
-- **v2 (`POST /api/v2/*`)** -- JSON-body auth, used for most operations (food search, diary read/write, nutrition, fasting, macros)
+- **v2 (`POST /api/v2/*`)** -- JSON-body auth, used for most operations (food search, diary read/write, nutrition, fasting, macros, biometrics)
 - **v3 (`DELETE /api/v3/user/{id}/*`)** -- Header-based auth (`x-crono-session`), used for diary entry deletion
 
 ## Python API
