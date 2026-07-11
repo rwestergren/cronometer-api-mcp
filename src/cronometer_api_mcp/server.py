@@ -669,6 +669,99 @@ def get_fasting_stats() -> str:
 
 
 # ------------------------------------------------------------------
+# Biometrics
+# ------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+def list_biometrics() -> str:
+    """List the biometric metrics tracked in Cronometer.
+
+    Returns every metric type the account can record (Weight, Body Fat,
+    Heart Rate, Blood Glucose, Waist Size, Sleep, blood panels, body
+    measurements, etc.). Use the metric_id and a unit_id from the results
+    with get_biometrics.
+    """
+    try:
+        client = _get_client()
+        metrics = client.get_metrics()
+
+        # Slim down results to the fields needed to call get_biometrics
+        results = []
+        for m in metrics:
+            results.append(
+                {
+                    "metric_id": m.get("id"),
+                    "name": m.get("name"),
+                    "units": [
+                        {"unit_id": u.get("id"), "name": u.get("name")}
+                        for u in m.get("units", [])
+                    ],
+                }
+            )
+
+        return _ok({"count": len(results), "metrics": results})
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+def get_biometrics(
+    metric_id: int,
+    unit_id: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
+    """Get a biometric time series such as weight or body fat from Cronometer.
+
+    Returns the recorded values over the date range as a list of
+    {day, value} points.
+
+    Use list_biometrics to find metric_id and unit_id (e.g. Weight is
+    metric_id 1, with unit_id 1 for kg or 2 for lbs).
+
+    Args:
+        metric_id: Numeric metric ID from list_biometrics.
+        unit_id: Numeric unit ID from the metric's units in list_biometrics.
+        start_date: Start date as YYYY-MM-DD (defaults to 30 days ago).
+        end_date: End date as YYYY-MM-DD (defaults to today).
+    """
+    try:
+        client = _get_client()
+        data = client.get_biometrics(
+            metric_id,
+            unit_id,
+            start=_parse_date(start_date),
+            end=_parse_date(end_date),
+        )
+        return _ok(
+            {
+                "metric_id": metric_id,
+                "unit_id": unit_id,
+                "start_date": start_date or str(date.today() - timedelta(days=30)),
+                "end_date": end_date or str(date.today()),
+                "biometrics": data,
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
+# ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 

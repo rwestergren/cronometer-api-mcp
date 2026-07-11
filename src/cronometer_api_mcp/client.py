@@ -871,6 +871,66 @@ class CronometerClient:
         logger.info("Fetched fasting stats")
         return data
 
+    # ------------------------------------------------------------------
+    # Biometrics
+    # ------------------------------------------------------------------
+
+    def get_metrics(self) -> list[dict]:
+        """Get the biometric metric catalog.
+
+        Each metric describes one trackable biometric (Weight, Body Fat,
+        Heart Rate, Blood Glucose, Waist Size, ...) with keys: id, name,
+        legacy (bool), and units -- a list of {id, name, ...} the value can
+        be expressed in. Cronometer stores every biometric under one of
+        these metric IDs.
+
+        Uses: POST /api/v2/get_metrics
+        """
+        payload = {"config": {"call_version": 1}}
+        data = self._request("/api/v2/get_metrics", payload)
+        return data.get("metrics", [])
+
+    def get_biometrics(
+        self,
+        metric_id: int,
+        unit_id: int,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> dict:
+        """Get a biometric time series (e.g. weight, body fat) over a range.
+
+        Args:
+            metric_id: Metric ID from get_metrics (e.g. 1 for Weight).
+            unit_id: Unit ID from the metric's units list (e.g. 1 for kg).
+            start: Start date. Defaults to 30 days before `end`.
+            end: End date. Defaults to today.
+
+        Uses: POST /api/v2/get_biometrics
+
+        Returns the API response: {"data": [{"day": "YYYY-MM-DD", "value": float}, ...]}.
+        """
+        from datetime import timedelta
+
+        end = end or date.today()
+        start = start or (end - timedelta(days=30))
+
+        payload = {
+            "metricId": metric_id,
+            "unitId": unit_id,
+            "start": self._format_day(start),
+            "end": self._format_day(end),
+            "config": {"call_version": 1},
+        }
+        data = self._request("/api/v2/get_biometrics", payload)
+        logger.info(
+            "Fetched biometrics for metric %d (unit %d) %s to %s",
+            metric_id,
+            unit_id,
+            self._format_day(start),
+            self._format_day(end),
+        )
+        return data
+
 
 # ======================================================================
 # Helpers
