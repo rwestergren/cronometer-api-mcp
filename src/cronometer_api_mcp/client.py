@@ -259,11 +259,13 @@ class CronometerClient:
         resp.raise_for_status()
         data = resp.json()
 
-        # Some endpoints return errors in the body
-        if isinstance(data, dict) and data.get("result") == "FAILURE":
+        # Some endpoints return errors in the body with an HTTP 200. An expired
+        # session comes back as {"result": "FAIL", "error": "..."}; "FAILURE" is
+        # kept defensively (never observed in real traffic, but harmless).
+        if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
             if not _retried:
                 logger.warning("Cronometer request failed, re-authenticating: %s", data)
-                self._token = None
+                self._invalidate_session()
                 self.login()
                 return self._request(endpoint, payload, _retried=True)
             raise CronometerError(f"Cronometer API error: {data}")

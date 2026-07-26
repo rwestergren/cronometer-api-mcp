@@ -33,6 +33,7 @@ cronometer-api-mcp = "cronometer_api_mcp.server:main"
 [dependency-groups]
 dev = [
     "ruff>=0.8.0",
+    "pytest>=8.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
