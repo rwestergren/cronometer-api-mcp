@@ -85,7 +85,7 @@ export CRONOMETER_PASSWORD="your-password"
 
 | Tool | Description |
 |------|-------------|
-| `get_food_log` | Diary entries for a date with food names, amounts, and meal groups, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
+| `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, and that food's per-entry nutrient contribution, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
 | `get_daily_nutrition` | Consumed macro and micronutrient totals for every nutrient tracked in Cronometer |
 | `get_nutrition_scores` | Category scores (Vitamins, Minerals, etc.) with per-nutrient consumed amounts and confidence levels |
 

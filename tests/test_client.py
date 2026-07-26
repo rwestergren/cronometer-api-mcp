@@ -14,7 +14,7 @@ import pytest
 
 from cronometer_api_mcp.client import CronometerClient, CronometerError
 
-# Real captured response body from an expired session (see repo `flows`).
+# Real response body observed from an expired session.
 REAL_FAIL_BODY = {"result": "FAIL", "error": "Token Authorization failed"}
 # Synthetic/defensive variant. Never observed in real traffic, but the
 # client keeps handling it just in case some endpoint uses it.
@@ -121,3 +121,133 @@ def test_stale_cache_file_is_removed_on_failure(tmp_path):
 
     # _invalidate_session() should have unlinked the stale file.
     assert not session_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Diary enrichment (get_food_log food names / per-entry nutrients)
+# ---------------------------------------------------------------------------
+
+
+def _enrich_client(tmp_path: Path):
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 123
+    client._token = "TOKEN"
+    return client
+
+
+SAMPLE_DIARY = {
+    "diary": [
+        {
+            "type": "Serving",
+            "foodId": 100,
+            "measureId": 10,
+            "grams": 200,
+            "order": 65537,
+        },
+        {
+            "type": "Serving",
+            "foodId": 200,
+            "measureId": 999,  # unknown measure -> falls back to default
+            "grams": 50,
+            "order": 65538,
+        },
+        {"type": "Exercise", "name": "Running", "order": 1},
+    ]
+}
+
+SAMPLE_FOODS = [
+    {
+        "id": 100,
+        "name": "Oats",
+        "source": "USDA",
+        "category": "Grains",
+        "defaultMeasureId": 10,
+        "measures": [{"id": 10, "name": "cup", "value": 100.0}],
+        # per-100g
+        "nutrients": [{"id": 208, "amount": 389.0}, {"id": 203, "amount": 16.9}],
+    },
+    {
+        "id": 200,
+        "name": "Milk",
+        "source": "Custom",
+        "defaultMeasureId": 20,
+        "measures": [{"id": 20, "name": "glass", "value": 244.0}],
+        "nutrients": [{"id": 208, "amount": 42.0}],
+    },
+]
+
+NUTRIENT_DEFS = {
+    208: {"name": "Energy", "unit": "kcal", "category": "General"},
+    203: {"name": "Protein", "unit": "g", "category": "Protein"},
+}
+
+
+def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
+    client = _enrich_client(tmp_path)
+    client.get_foods = lambda ids: SAMPLE_FOODS  # type: ignore[method-assign]
+    client.get_nutrient_definitions = lambda: NUTRIENT_DEFS  # type: ignore[method-assign]
+
+    out = client.enrich_diary_servings(
+        {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+    )
+    entries = out["diary"]
+
+    oats = entries[0]
+    assert oats["name"] == "Oats"
+    assert oats["source"] == "USDA"
+    assert oats["category"] == "Grains"
+    assert oats["measure"] == {
+        "measure_id": 10,
+        "name": "cup",
+        "grams_per_unit": 100.0,
+    }
+    assert oats["servings"] == 2.0  # 200g / 100g per cup
+    # per-100g energy 389 scaled to 200g -> 778
+    energy = next(n for n in oats["nutrients"] if n["id"] == 208)
+    assert energy["amount"] == 778.0
+    assert energy["name"] == "Energy"
+    assert energy["unit"] == "kcal"
+
+    milk = entries[1]
+    # unknown measureId 999 -> fell back to defaultMeasureId 20
+    assert milk["measure"]["measure_id"] == 20
+    assert milk["measure"]["name"] == "glass"
+    # 42 kcal/100g scaled to 50g -> 21
+    assert next(n for n in milk["nutrients"] if n["id"] == 208)["amount"] == 21.0
+
+    # Non-Serving entry untouched
+    assert entries[2] == {"type": "Exercise", "name": "Running", "order": 1}
+
+
+def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
+    client = _enrich_client(tmp_path)
+
+    def boom(ids):
+        raise CronometerError("network down")
+
+    client.get_foods = boom  # type: ignore[method-assign]
+
+    original = {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+    out = client.enrich_diary_servings(
+        {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+    )
+
+    # Entries returned unchanged (no name/nutrients added).
+    assert out["diary"] == original["diary"]
+
+
+def test_enrich_diary_no_servings_skips_lookup(tmp_path):
+    client = _enrich_client(tmp_path)
+    calls = {"n": 0}
+
+    def track(ids):
+        calls["n"] += 1
+        return []
+
+    client.get_foods = track  # type: ignore[method-assign]
+
+    out = client.enrich_diary_servings(
+        {"diary": [{"type": "Exercise", "name": "Running"}]}
+    )
+    assert calls["n"] == 0
+    assert out["diary"] == [{"type": "Exercise", "name": "Running"}]

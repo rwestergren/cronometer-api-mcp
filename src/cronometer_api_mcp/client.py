@@ -374,6 +374,24 @@ class CronometerClient:
         )
         return data
 
+    def get_foods(self, food_ids: list[int]) -> list[dict]:
+        """Batch-fetch full food details for many food IDs in one call.
+
+        Mirrors get_food but resolves a list of IDs at once, which is how the
+        Cronometer app resolves an entire day's diary. Returns a list of food
+        objects, each with keys: id, name, source, measures, defaultMeasureId,
+        nutrients, etc. Nutrient amounts are stored per-100g.
+
+        Returns an empty list if food_ids is empty.
+        """
+        if not food_ids:
+            return []
+        payload = {"ids": list(food_ids), "config": {"call_version": 1}}
+        data = self._request("/api/v2/get_foods", payload)
+        foods = data.get("foods", []) if isinstance(data, dict) else []
+        logger.info("Batch-fetched %d/%d foods", len(foods), len(food_ids))
+        return foods
+
     # ------------------------------------------------------------------
     # Custom food creation
     # ------------------------------------------------------------------
@@ -809,6 +827,114 @@ class CronometerClient:
             len(nutrients),
         )
         return {"macros": macros, "nutrients": nutrients}
+
+    def enrich_diary_servings(self, diary: dict) -> dict:
+        """Merge food metadata into a raw get_diary payload (best-effort).
+
+        Diary "Serving" entries carry only numeric IDs (foodId, measureId,
+        grams). This resolves each foodId via a single batch get_foods call and
+        merges per-entry:
+
+          - name, source, category: from the food object
+          - measure: {measure_id, name, grams_per_unit} for the entry's
+            measureId (falls back to the food's defaultMeasureId)
+          - servings: grams / grams_per_unit, when derivable
+          - nutrients: the food's per-100g profile scaled to the entry's grams,
+            labeled with name/unit/category via the nutrient definitions catalog
+
+        Enrichment is best-effort: if the get_foods call fails or a food is not
+        returned, the corresponding entries are left unchanged. The diary dict
+        is mutated in place and also returned. Non-Serving entries (Exercise,
+        Biometric) already carry a name and are left untouched.
+        """
+        if not isinstance(diary, dict):
+            return diary
+        entries = diary.get("diary")
+        if not isinstance(entries, list):
+            return diary
+
+        food_ids = sorted(
+            {
+                e["foodId"]
+                for e in entries
+                if isinstance(e, dict)
+                and e.get("type") == "Serving"
+                and isinstance(e.get("foodId"), int)
+            }
+        )
+        if not food_ids:
+            return diary
+
+        try:
+            foods = self.get_foods(food_ids)
+        except Exception as exc:  # best-effort: keep diary without names
+            logger.warning("Diary enrichment skipped (get_foods failed): %s", exc)
+            return diary
+
+        food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
+        try:
+            defs = self.get_nutrient_definitions()
+        except Exception:
+            defs = {}
+
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "Serving":
+                continue
+            food = food_by_id.get(entry.get("foodId"))
+            if not food:
+                continue
+
+            entry["name"] = food.get("name")
+            entry["source"] = food.get("source")
+            if food.get("category") is not None:
+                entry["category"] = food.get("category")
+
+            measures = {
+                m.get("id"): m for m in food.get("measures", []) if isinstance(m, dict)
+            }
+            measure = measures.get(entry.get("measureId")) or measures.get(
+                food.get("defaultMeasureId")
+            )
+            grams = entry.get("grams")
+            if measure:
+                grams_per_unit = measure.get("value")
+                entry["measure"] = {
+                    "measure_id": measure.get("id"),
+                    "name": measure.get("name"),
+                    "grams_per_unit": grams_per_unit,
+                }
+                if (
+                    isinstance(grams, (int, float))
+                    and isinstance(grams_per_unit, (int, float))
+                    and grams_per_unit
+                ):
+                    entry["servings"] = round(grams / grams_per_unit, 4)
+
+            # Food nutrients are stored per-100g; scale to the entry's grams.
+            if isinstance(grams, (int, float)):
+                scale = grams / 100.0
+                scaled: list[dict] = []
+                for n in food.get("nutrients", []):
+                    if not isinstance(n, dict):
+                        continue
+                    nid = n.get("id")
+                    amount = n.get("amount")
+                    if nid is None or not isinstance(amount, (int, float)):
+                        continue
+                    meta = defs.get(nid, {})
+                    scaled.append(
+                        {
+                            "id": nid,
+                            "name": meta.get("name"),
+                            "amount": round(amount * scale, 4),
+                            "unit": meta.get("unit"),
+                            "category": meta.get("category"),
+                        }
+                    )
+                entry["nutrients"] = scaled
+
+        logger.info("Enriched %d diary foods with names/nutrients", len(food_by_id))
+        return diary
 
     # ------------------------------------------------------------------
     # Macro targets

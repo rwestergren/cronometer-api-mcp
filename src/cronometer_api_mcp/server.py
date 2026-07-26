@@ -84,8 +84,14 @@ def _err(e: Exception) -> str:
 def get_food_log(date: str | None = None) -> str:
     """Get all diary entries for a given date.
 
-    Returns every food entry logged for the day, including food names,
-    amounts, meal groups, and nutrient data.
+    Returns every food entry logged for the day. Each "Serving" entry is
+    enriched (best-effort) with the food's name, source, the serving measure
+    (unit name and grams per unit), the number of servings, and that food's
+    own nutrient profile scaled to the amount eaten. Non-food entries
+    (exercise, biometrics) carry their own name.
+
+    Note: the per-entry "nutrients" are each food's individual contribution,
+    which is distinct from the day-level nutrition_summary aggregate below.
 
     Also returns a top-level energy_summary field with pre-computed
     values most relevant to the user:
@@ -114,6 +120,7 @@ def get_food_log(date: str | None = None) -> str:
         client = _get_client()
         day = _parse_date(date)
         data = client.get_diary(day)
+        data = client.enrich_diary_servings(data)
 
         summary = (data or {}).get("summary") or {}
         target = (summary.get("macros") or {}).get("energy")
