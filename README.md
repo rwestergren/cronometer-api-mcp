@@ -118,54 +118,13 @@ export CRONOMETER_PASSWORD="your-password"
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
-## Remote Deployment
+## Transport
 
-The server supports remote deployment with OAuth 2.1 authorization (PKCE) for use with Claude.ai and other remote MCP clients.
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CRONOMETER_USERNAME` | Yes | Cronometer account email |
-| `CRONOMETER_PASSWORD` | Yes | Cronometer account password |
-| `MCP_TRANSPORT` | No | Transport mode: `stdio` (default), `sse`, or `streamable-http` |
-| `MCP_AUTH_TOKEN` | No | Bearer token for remote auth (enables OAuth flow) |
-| `MCP_OAUTH_CLIENT_ID` | No | OAuth client ID for remote clients |
-| `MCP_OAUTH_CLIENT_SECRET` | No | OAuth client secret for remote clients |
-| `MCP_BASE_URL` | No | Public base URL for OAuth metadata endpoints |
-| `PORT` | No | Listen port for remote transports (default 8000) |
-
-### Dokku / Heroku Deployment
-
-The project includes a `Procfile` and `.python-version` for direct deployment with the Heroku Python buildpack:
-
-```bash
-# Create app
-dokku apps:create cronometer-api-mcp
-
-# Set environment
-dokku config:set cronometer-api-mcp \
-  MCP_TRANSPORT=streamable-http \
-  MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
-  MCP_OAUTH_CLIENT_ID=my-client \
-  MCP_OAUTH_CLIENT_SECRET=$(openssl rand -hex 32) \
-  MCP_BASE_URL=https://your-domain.com \
-  CRONOMETER_USERNAME=your@email.com \
-  CRONOMETER_PASSWORD=your-password
-
-# Deploy
-git push dokku main
-```
-
-### Claude.ai Remote Connection
-
-When deployed remotely with OAuth configured, connect from Claude.ai using:
-
-- **Server URL**: `https://your-domain.com/mcp`
-- **OAuth Client ID**: Value of `MCP_OAUTH_CLIENT_ID`
-- **OAuth Client Secret**: Value of `MCP_OAUTH_CLIENT_SECRET`
-
-Claude.ai will open a browser tab for authorization. Click **Authorize** to complete the connection.
+stdio only. For remote/hosted use, the stdio server is wrapped by
+[supergateway](https://github.com/supercorp-ai/supergateway) (see `Dockerfile`),
+which owns the HTTP listener and exposes MCP streamable-HTTP at `/mcp`. The
+server has **no built-in authentication** — any remote deployment must sit
+behind an authenticating gateway or reverse proxy.
 
 ## Development
 

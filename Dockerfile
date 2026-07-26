@@ -18,6 +18,7 @@ FROM supercorp/supergateway:uvx
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_INSTALL_DIR=/opt/uv-python \
     UV_TOOL_DIR=/opt/uv-tools \
     UV_TOOL_BIN_DIR=/usr/local/bin \
@@ -31,9 +32,11 @@ COPY src ./src
 
 # Pre-install Python 3.14 into a deterministic location, then install the MCP
 # as a uv tool so its console entry point (`cronometer-api-mcp`) lands in
-# /usr/local/bin on $PATH.
+# /usr/local/bin on $PATH. `--compile-bytecode` writes .pyc files during the
+# build so cold container starts don't pay the compile tax on every spawn of
+# the stdio child by supergateway.
 RUN uv python install 3.14 \
-    && uv tool install --python 3.14 . \
+    && uv tool install --compile-bytecode --python 3.14 . \
     && cronometer-api-mcp --help >/dev/null 2>&1 || true
 
 # supergateway wraps the stdio MCP; Nomad (or docker run -p) remaps $PORT.
