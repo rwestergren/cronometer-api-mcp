@@ -13,7 +13,13 @@
 # Base image: supercorp/supergateway:uvx (Alpine + Node 20 + uv).
 # We install Python 3.14 via uv (cronometer-api-mcp requires >=3.14).
 
-FROM supercorp/supergateway:uvx
+# Pinned by digest so the bundled Node SDK pairing is a deliberate, reproducible
+# choice rather than drift under a floating tag. See the SDK upgrade below:
+# supergateway proxies the MCP `initialize` exchange verbatim, so its
+# HTTP-transport SDK must support every protocol version the Python side can
+# negotiate or spec-compliant clients (e.g. claude.ai on 2025-11-25) connect and
+# then get "no tools available" when the next request is rejected.
+FROM supercorp/supergateway:uvx@sha256:2ffee900c18d8375096b392c8be15cd344535a05b753a5b182da227ab6306a15
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -38,6 +44,22 @@ COPY src ./src
 RUN uv python install 3.14 \
     && uv tool install --compile-bytecode --python 3.14 . \
     && cronometer-api-mcp --help >/dev/null 2>&1 || true
+
+# supergateway owns the HTTP listener and validates the Mcp-Protocol-Version
+# header against its bundled @modelcontextprotocol/sdk. The base image's pinned
+# SDK (1.19.1) tops out at 2025-06-18, so a client that negotiates a newer
+# version at `initialize` has its follow-up requests rejected. Upgrade the SDK
+# in supergateway's own node_modules to a release that covers the versions the
+# Python `mcp` package negotiates.
+#
+# NOTE: this is a per-image mitigation, not the durable fix. supergateway
+# proxies `initialize` verbatim but then validates the negotiated version
+# against its own (possibly older) SDK, so the skew recurs whenever the wrapped
+# server's SDK is newer. The upstream fix is to clamp/reject the negotiation at
+# `initialize` inside supergateway itself:
+#   https://github.com/supercorp-ai/supergateway/issues/117
+RUN cd /usr/local/lib/node_modules/supergateway \
+    && npm install @modelcontextprotocol/sdk@^1.29.0 --no-save --no-audit --no-fund
 
 # supergateway wraps the stdio MCP; Nomad (or docker run -p) remaps $PORT.
 # --stateful enables Mcp-Session-Id semantics per the MCP streamable-HTTP spec.
