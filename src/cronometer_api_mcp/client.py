@@ -14,12 +14,17 @@ import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://mobile.cronometer.com"
+
+# Fallback timezone used only if the account's timezone can't be resolved from
+# the login response. Matches the value historically assumed by this client.
+_DEFAULT_TIMEZONE = "America/New_York"
 
 # Cache the auth token across processes to avoid /api/v2/login rate limits.
 # Cronometer throttles repeated logins per account; reusing a sessionKey lets
@@ -84,6 +89,10 @@ class CronometerClient:
     def __init__(self, *, session_path: Path | None = None) -> None:
         self._user_id: int | None = None
         self._token: str | None = None
+        # IANA timezone name of the Cronometer account, resolved from the login
+        # response (or a restored session cache). Diary timestamps and "today"
+        # are computed in this zone so behavior is independent of the host clock.
+        self._timezone: str | None = None
         self._session_path: Path = session_path or _DEFAULT_SESSION_PATH
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
@@ -109,10 +118,12 @@ class CronometerClient:
         return os.getenv("CRONOMETER_USERNAME", "")
 
     def _load_cached_session(self) -> None:
-        """Restore (user_id, token) from disk if a cache file exists.
+        """Restore (user_id, token, timezone) from disk if a cache file exists.
 
         Silently ignores any read/parse error: the worst case is we
-        re-login, which is the original behaviour.
+        re-login, which is the original behaviour. A cache written by an
+        older version that predates timezone persistence is treated as
+        invalid so the next login refreshes the account timezone.
         """
         try:
             raw = self._session_path.read_text()
@@ -126,17 +137,24 @@ class CronometerClient:
             return
         token = data.get("token")
         user_id = data.get("user_id")
+        timezone = data.get("timezone")
+        # Reject caches that lack a stored timezone (pre-timezone schema) so we
+        # re-login once and pick up the account zone rather than guessing.
+        if not isinstance(timezone, str):
+            return
         if isinstance(token, str) and isinstance(user_id, int):
             self._user_id = user_id
             self._token = token
+            self._timezone = timezone
             logger.debug(
-                "Restored Cronometer session for user_id=%d from %s",
+                "Restored Cronometer session for user_id=%d (tz=%s) from %s",
                 user_id,
+                timezone,
                 self._session_path,
             )
 
     def _save_cached_session(self) -> None:
-        """Persist (user_id, token) so future processes can reuse it."""
+        """Persist (user_id, token, timezone) so future processes can reuse it."""
         if self._user_id is None or self._token is None:
             return
         try:
@@ -148,6 +166,7 @@ class CronometerClient:
                         "username": self._cache_key(),
                         "user_id": self._user_id,
                         "token": self._token,
+                        "timezone": self._timezone,
                     }
                 )
             )
@@ -162,6 +181,7 @@ class CronometerClient:
     def _invalidate_session(self) -> None:
         """Drop the in-memory token and remove the cache file."""
         self._token = None
+        self._timezone = None
         try:
             self._session_path.unlink()
         except FileNotFoundError:
@@ -213,10 +233,16 @@ class CronometerClient:
 
         self._user_id = data["id"]
         self._token = data["sessionKey"]
+        # The login response embeds the account profile, including the user's
+        # configured IANA timezone. Prefer it over the host clock so diary
+        # timestamps are correct regardless of where the server runs.
+        tz = data.get("timezone")
+        self._timezone = tz if isinstance(tz, str) and tz else _DEFAULT_TIMEZONE
         self._save_cached_session()
         logger.info(
-            "Cronometer login successful (userId=%d, token=%s...)",
+            "Cronometer login successful (userId=%d, tz=%s, token=%s...)",
             self._user_id,
+            self._timezone,
             self._token[:8] if self._token else "???",
         )
 
@@ -322,10 +348,38 @@ class CronometerClient:
     # Date helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _format_day(d: date | None = None) -> str:
-        """Format a date as Cronometer expects: non-zero-padded 'YYYY-M-D'."""
-        d = d or date.today()
+    def _tzinfo(self) -> ZoneInfo:
+        """Return the account's timezone, falling back to the default.
+
+        Resolved from the login response (or restored session cache). If the
+        stored name is unset or unknown (e.g. a zone missing from the system
+        tzdata), log once and fall back so stamping never hard-fails.
+        """
+        name = self._timezone or _DEFAULT_TIMEZONE
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError, ValueError:
+            logger.warning(
+                "Unknown account timezone %r; falling back to %s",
+                name,
+                _DEFAULT_TIMEZONE,
+            )
+            return ZoneInfo(_DEFAULT_TIMEZONE)
+
+    def now(self) -> datetime:
+        """Current wall-clock time in the account's timezone (aware)."""
+        return datetime.now(self._tzinfo())
+
+    def today(self) -> date:
+        """Today's date in the account's timezone."""
+        return self.now().date()
+
+    def _format_day(self, d: date | None = None) -> str:
+        """Format a date as Cronometer expects: non-zero-padded 'YYYY-M-D'.
+
+        Defaults to today in the account's timezone, not the host clock.
+        """
+        d = d or self.today()
         return f"{d.year}-{d.month}-{d.day}"
 
     # ------------------------------------------------------------------
@@ -509,7 +563,7 @@ class CronometerClient:
 
         Returns the serving confirmation dict from the API.
         """
-        now = datetime.now()
+        now = self.now()
         day_str = self._format_day(day)
         time_str = f"{now.hour}:{now.minute}:{now.second}"
 
@@ -663,7 +717,7 @@ class CronometerClient:
         """
         from datetime import timedelta
 
-        to_day = to_day or date.today()
+        to_day = to_day or self.today()
         from_day = from_day or (to_day - timedelta(days=1))
 
         payload = {
@@ -977,7 +1031,7 @@ class CronometerClient:
         """
         from datetime import timedelta
 
-        end = end or date.today()
+        end = end or self.today()
         start = start or (end - timedelta(days=30))
 
         payload = {
@@ -1039,7 +1093,7 @@ class CronometerClient:
         """
         from datetime import timedelta
 
-        end = end or date.today()
+        end = end or self.today()
         start = start or (end - timedelta(days=30))
 
         payload = {

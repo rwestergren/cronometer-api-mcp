@@ -643,8 +643,9 @@ def get_fasting_history(
         data = client.get_fasting_with_date_range(start, end)
         return _ok(
             {
-                "start_date": start_date or str(date.today() - timedelta(days=30)),
-                "end_date": end_date or str(date.today()),
+                "start_date": start_date
+                or str(date_module_today() - timedelta(days=30)),
+                "end_date": end_date or str(date_module_today()),
                 "fasting": data,
             }
         )
@@ -758,8 +759,9 @@ def get_biometrics(
             {
                 "metric_id": metric_id,
                 "unit_id": unit_id,
-                "start_date": start_date or str(date.today() - timedelta(days=30)),
-                "end_date": end_date or str(date.today()),
+                "start_date": start_date
+                or str(date_module_today() - timedelta(days=30)),
+                "end_date": end_date or str(date_module_today()),
                 "biometrics": data,
             }
         )
@@ -773,8 +775,13 @@ def get_biometrics(
 
 
 def date_module_today() -> date:
-    """Return today's date (extracted for easy mocking in tests)."""
-    return date.today()
+    """Return today's date in the account's timezone.
+
+    Uses the authenticated client's timezone (resolved from the Cronometer
+    account) so response echoes match the diary day an entry actually lands
+    on, independent of the host clock. Extracted for easy mocking in tests.
+    """
+    return _get_client().today()
 
 
 # ------------------------------------------------------------------
