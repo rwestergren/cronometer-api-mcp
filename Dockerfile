@@ -32,17 +32,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy the package source. Uses the .dockerignore alongside this file.
-COPY pyproject.toml README.md ./
+# Copy the package source (plus uv.lock). Uses the .dockerignore alongside this file.
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-# Pre-install Python 3.14 into a deterministic location, then install the MCP
-# as a uv tool so its console entry point (`cronometer-api-mcp`) lands in
-# /usr/local/bin on $PATH. `--compile-bytecode` writes .pyc files during the
-# build so cold container starts don't pay the compile tax on every spawn of
-# the stdio child by supergateway.
+# Install from uv.lock with `uv sync --frozen`: exact locked versions, and the
+# build fails on a stale lock rather than re-resolving. Entry point lands in /app/.venv/bin.
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH=/app/.venv/bin:$PATH
 RUN uv python install 3.14 \
-    && uv tool install --compile-bytecode --python 3.14 . \
+    && uv sync --frozen --no-dev --compile-bytecode --python 3.14 \
     && cronometer-api-mcp --help >/dev/null 2>&1 || true
 
 # supergateway owns the HTTP listener and validates the Mcp-Protocol-Version
