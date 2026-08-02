@@ -204,6 +204,13 @@ SAMPLE_DIARY = {
             "grams": 50,
             "order": 65538,
         },
+        {
+            "type": "Serving",
+            "foodId": 300,
+            "measureId": 30,
+            "grams": 1.1,  # Recipe: "grams" is a serving count, not grams
+            "order": 65539,
+        },
         {"type": "Exercise", "name": "Running", "order": 1},
     ]
 }
@@ -226,6 +233,18 @@ SAMPLE_FOODS = [
         "defaultMeasureId": 20,
         "measures": [{"id": 20, "name": "glass", "value": 244.0}],
         "nutrients": [{"id": 208, "amount": 42.0}],
+    },
+    {
+        "id": 300,
+        "name": "Recipe Food",
+        "source": "Custom",
+        "defaultMeasureId": 30,
+        "measures": [
+            {"id": 30, "name": "serving", "value": 1, "amount": 1, "type": "Recipe"},
+            {"id": 31, "name": "g", "value": 233.4, "amount": 1, "type": "Recipe"},
+        ],
+        # stored per one reference serving (not per-100g)
+        "nutrients": [{"id": 208, "amount": 708.538}, {"id": 203, "amount": 56.03}],
     },
 ]
 
@@ -268,8 +287,19 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     # 42 kcal/100g scaled to 50g -> 21
     assert next(n for n in milk["nutrients"] if n["id"] == 208)["amount"] == 21.0
 
+    recipe = entries[2]
+    assert recipe["name"] == "Recipe Food"
+    assert recipe["measure"]["measure_id"] == 30
+    assert recipe["measure"]["name"] == "serving"
+    # Recipe measure: nutrients are per-serving and "grams" is a serving count,
+    # so 708.538 kcal/serving * 1.1 servings -> 779.39 (not grams/100)
+    energy = next(n for n in recipe["nutrients"] if n["id"] == 208)
+    assert energy["amount"] == 779.3918
+    protein = next(n for n in recipe["nutrients"] if n["id"] == 203)
+    assert protein["amount"] == 61.633
+
     # Non-Serving entry untouched
-    assert entries[2] == {"type": "Exercise", "name": "Running", "order": 1}
+    assert entries[3] == {"type": "Exercise", "name": "Running", "order": 1}
 
 
 def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):

@@ -958,8 +958,10 @@ class CronometerClient:
           - measure: {measure_id, name, grams_per_unit} for the entry's
             measureId (falls back to the food's defaultMeasureId)
           - servings: grams / grams_per_unit, when derivable
-          - nutrients: the food's per-100g profile scaled to the entry's grams,
-            labeled with name/unit/category via the nutrient definitions catalog
+          - nutrients: the food's nutrient profile scaled to the entry's amount
+            (per-100g for Weight/Atomic measures, per-serving for Recipe
+            measures), labeled with name/unit/category via the nutrient
+            definitions catalog
 
         Enrichment is best-effort: if the get_foods call fails or a food is not
         returned, the corresponding entries are left unchanged. The diary dict
@@ -1029,9 +1031,17 @@ class CronometerClient:
                 ):
                     entry["servings"] = round(grams / grams_per_unit, 4)
 
-            # Food nutrients are stored per-100g; scale to the entry's grams.
+            # Nutrient scaling depends on the measure type:
+            #   - Recipe measures: nutrients are stored per one reference
+            #     serving and the diary "grams" field is a serving count, so
+            #     scale by grams directly.
+            #   - Weight/Atomic measures: nutrients are stored per-100g and
+            #     "grams" is real grams, so scale by grams / 100.
             if isinstance(grams, (int, float)):
-                scale = grams / 100.0
+                if measure and measure.get("type") == "Recipe":
+                    scale = grams
+                else:
+                    scale = grams / 100.0
                 scaled: list[dict] = []
                 for n in food.get("nutrients", []):
                     if not isinstance(n, dict):
