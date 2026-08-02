@@ -26,6 +26,13 @@ BASE_URL = "https://mobile.cronometer.com"
 # the login response. Matches the value historically assumed by this client.
 _DEFAULT_TIMEZONE = "America/New_York"
 
+# Optional deploy-time override for the account timezone. When set to a valid
+# IANA zone name it is authoritative over both the login response and any
+# cached value. This is the escape hatch for accounts whose server-side zone
+# was clobbered by older builds (see issue #29) or when the resolved zone is
+# otherwise wrong.
+_ACCOUNT_TZ_ENV = "CRONOMETER_ACCOUNT_TZ"
+
 # Cache the auth token across processes to avoid /api/v2/login rate limits.
 # Cronometer throttles repeated logins per account; reusing a sessionKey lets
 # short-lived CLI invocations behave like a long-running app.
@@ -145,11 +152,14 @@ class CronometerClient:
         if isinstance(token, str) and isinstance(user_id, int):
             self._user_id = user_id
             self._token = token
-            self._timezone = timezone
+            # A CRONOMETER_ACCOUNT_TZ override wins over the cached value so a
+            # session.json poisoned by an older build (issue #29) can't defeat
+            # an explicit deploy-time setting without invalidating the cache.
+            self._timezone = self._resolve_timezone(timezone)
             logger.debug(
                 "Restored Cronometer session for user_id=%d (tz=%s) from %s",
                 user_id,
-                timezone,
+                self._timezone,
                 self._session_path,
             )
 
@@ -205,7 +215,15 @@ class CronometerClient:
         payload = {
             "email": username,
             "password": password,
-            "timezone": "America/New_York",
+            # Must stay null: the login endpoint treats a non-null timezone as
+            # a *write* that overwrites the account's server-side zone (verified
+            # against the live API — sending "Asia/Tokyo" changed the account
+            # setting and it persisted across subsequent logins). Older builds
+            # hardcoded "America/New_York" here, silently resetting every user's
+            # account zone to Eastern on each login (issue #29). Sending null
+            # leaves the account setting untouched and the response echoes the
+            # account's real zone.
+            "timezone": None,
             "userCode": None,
             "build": "4.48.2 b2807-a",
             "device": "Android 14 (SDK 34), Google Pixel 6 Pro",
@@ -235,9 +253,9 @@ class CronometerClient:
         self._token = data["sessionKey"]
         # The login response embeds the account profile, including the user's
         # configured IANA timezone. Prefer it over the host clock so diary
-        # timestamps are correct regardless of where the server runs.
-        tz = data.get("timezone")
-        self._timezone = tz if isinstance(tz, str) and tz else _DEFAULT_TIMEZONE
+        # timestamps are correct regardless of where the server runs. A
+        # CRONOMETER_ACCOUNT_TZ override, if set, wins over the response.
+        self._timezone = self._resolve_timezone(data.get("timezone"))
         self._save_cached_session()
         logger.info(
             "Cronometer login successful (userId=%d, tz=%s, token=%s...)",
@@ -347,6 +365,42 @@ class CronometerClient:
     # ------------------------------------------------------------------
     # Date helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _env_timezone() -> str | None:
+        """Return a valid IANA zone from CRONOMETER_ACCOUNT_TZ, or None.
+
+        An invalid name is logged and ignored so a typo can't hard-fail
+        startup; resolution then falls through to the response/cache value.
+        """
+        name = os.getenv(_ACCOUNT_TZ_ENV)
+        if not name:
+            return None
+        try:
+            ZoneInfo(name)
+        except ZoneInfoNotFoundError, ValueError:
+            logger.warning(
+                "Ignoring invalid %s=%r (not a known IANA timezone)",
+                _ACCOUNT_TZ_ENV,
+                name,
+            )
+            return None
+        return name
+
+    def _resolve_timezone(self, response_tz: str | None) -> str:
+        """Resolve the account timezone by priority.
+
+        1. CRONOMETER_ACCOUNT_TZ env override (authoritative escape hatch).
+        2. The value from the login response (trustworthy now that login()
+           no longer overwrites the account's server-side zone; see #29).
+        3. The historical default.
+        """
+        env = self._env_timezone()
+        if env:
+            return env
+        if isinstance(response_tz, str) and response_tz:
+            return response_tz
+        return _DEFAULT_TIMEZONE
 
     def _tzinfo(self) -> ZoneInfo:
         """Return the account's timezone, falling back to the default.

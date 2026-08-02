@@ -39,6 +39,20 @@ export CRONOMETER_USERNAME="your@email.com"
 export CRONOMETER_PASSWORD="your-password"
 ```
 
+#### Optional: override the account timezone
+
+Diary entries are stamped in your Cronometer account's timezone, which the
+server reports at login. If that zone is wrong (for example, an older build
+had reset it) you can force a specific IANA zone without changing your account
+settings:
+
+```bash
+export CRONOMETER_ACCOUNT_TZ="America/Los_Angeles"
+```
+
+When set, this takes precedence over both the value reported at login and any
+cached session, so it also overrides a stale cached timezone.
+
 ### 3. Configure your MCP client
 
 `uvx` downloads and runs the server on demand -- no separate install step.

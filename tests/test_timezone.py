@@ -148,6 +148,127 @@ def test_login_captures_account_timezone(tmp_path, monkeypatch):
     assert saved["timezone"] == "America/Los_Angeles"
 
 
+def test_login_sends_null_request_timezone(tmp_path, monkeypatch):
+    """login() must send timezone:null in the request. A non-null value is a
+    *write* that overwrites the account's server-side zone (issue #29), so the
+    field must never be hardcoded again -- this is a regression guard."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client = CronometerClient(session_path=tmp_path / "session.json")
+
+    captured: dict = {}
+
+    def fake_post(endpoint, json=None):
+        captured["payload"] = json
+        return FakeResp(
+            {
+                "result": "SUCCESS",
+                "id": 1,
+                "sessionKey": "K",
+                "timezone": "America/Los_Angeles",
+            }
+        )
+
+    client._http.post = fake_post  # type: ignore[method-assign]
+    client.login()
+
+    assert "timezone" in captured["payload"]
+    assert captured["payload"]["timezone"] is None
+    # The response zone is trusted now that we no longer overwrite it.
+    assert client._timezone == "America/Los_Angeles"
+
+
+def test_env_override_wins_over_login_response(tmp_path, monkeypatch):
+    """CRONOMETER_ACCOUNT_TZ is authoritative over the login response zone."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.setenv("CRONOMETER_ACCOUNT_TZ", "America/Los_Angeles")
+    client = CronometerClient(session_path=tmp_path / "session.json")
+
+    def fake_post(endpoint, json=None):
+        return FakeResp(
+            {
+                "result": "SUCCESS",
+                "id": 1,
+                "sessionKey": "K",
+                "timezone": "America/New_York",
+            }
+        )
+
+    client._http.post = fake_post  # type: ignore[method-assign]
+    client.login()
+
+    assert client._timezone == "America/Los_Angeles"
+    import json
+
+    saved = json.loads((tmp_path / "session.json").read_text())
+    assert saved["timezone"] == "America/Los_Angeles"
+
+
+def test_env_override_wins_over_poisoned_cache(tmp_path, monkeypatch):
+    """A session.json poisoned by an older build must not defeat an explicit
+    CRONOMETER_ACCOUNT_TZ override on warm start (issue #29)."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "")
+    monkeypatch.setenv("CRONOMETER_ACCOUNT_TZ", "Europe/Berlin")
+    import json
+
+    (tmp_path / "session.json").write_text(
+        json.dumps(
+            {
+                "username": "",
+                "user_id": 123,
+                "token": "TOKEN",
+                "timezone": "America/New_York",
+            }
+        )
+    )
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    assert client._token == "TOKEN"
+    assert client._timezone == "Europe/Berlin"
+
+
+def test_invalid_env_override_is_ignored(tmp_path, monkeypatch):
+    """A malformed CRONOMETER_ACCOUNT_TZ is ignored, falling through to the
+    login response rather than hard-failing."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.setenv("CRONOMETER_ACCOUNT_TZ", "Not/AZone")
+    client = CronometerClient(session_path=tmp_path / "session.json")
+
+    def fake_post(endpoint, json=None):
+        return FakeResp(
+            {
+                "result": "SUCCESS",
+                "id": 1,
+                "sessionKey": "K",
+                "timezone": "America/Chicago",
+            }
+        )
+
+    client._http.post = fake_post  # type: ignore[method-assign]
+    client.login()
+
+    assert client._timezone == "America/Chicago"
+
+
+def test_env_override_stamps_entries(tmp_path, monkeypatch, frozen_utc):
+    """End-to-end: with the override set, diary stamping uses the override zone
+    even when the client's stored zone would otherwise be Eastern."""
+    monkeypatch.setenv("CRONOMETER_ACCOUNT_TZ", "America/Los_Angeles")
+    client = _client(tmp_path, "America/New_York")
+    # Re-resolve as warm start would, honoring the override.
+    client._timezone = client._resolve_timezone("America/New_York")
+    captured = _capture_serving(client)
+
+    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+
+    serving = captured["payload"]["serving"]
+    # 18:01 UTC -> 11:01 PDT (Los Angeles), not 14:01 EDT.
+    assert serving["time"] == "11:1:30"
+    assert serving["day"] == "2026-7-27"
+
+
 def test_warm_start_restores_timezone(tmp_path, monkeypatch):
     """A cache file with a timezone is restored without re-login."""
     monkeypatch.setenv("CRONOMETER_USERNAME", "")
