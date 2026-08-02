@@ -269,6 +269,13 @@ class CronometerClient:
         if self._token is None:
             self.login()
 
+    @property
+    def user_id(self) -> int:
+        """Authenticated user id; logs in first if needed (#30/#31)."""
+        self._ensure_auth()
+        assert self._user_id is not None
+        return self._user_id
+
     def _auth_block(self) -> dict:
         return {
             "userId": self._user_id,
@@ -281,7 +288,11 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     def _request(self, endpoint: str, payload: dict, *, _retried: bool = False) -> dict:
-        """Send a v2 POST request with JSON auth block. Re-authenticates once on failure."""
+        """Send a v2 POST request with JSON auth block. Re-authenticates once on failure.
+
+        Callers must build payloads from authenticated state (read identity via
+        self.user_id, not self._user_id) so the retry can safely re-send the dict.
+        """
         self._ensure_auth()
 
         payload["auth"] = self._auth_block()
@@ -343,7 +354,7 @@ class CronometerClient:
         """
         self._ensure_auth()
 
-        url = f"/api/v3/user/{self._user_id}{path}"
+        url = f"/api/v3/user/{self.user_id}{path}"
         logger.debug("Cronometer v3 request: %s %s", method, url)
 
         resp = self._http.request(
@@ -630,7 +641,7 @@ class CronometerClient:
             "time": time_str,
             "offset": None,
             "source": None,
-            "userId": self._user_id,
+            "userId": self.user_id,
             "servingId": None,
             "type": "Serving",
             "foodId": food_id,
