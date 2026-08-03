@@ -5,6 +5,12 @@ on:
     branches: [main]
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.2.0)"
+        required: true
+        type: string
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -21,7 +27,10 @@ jobs:
       attestations: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

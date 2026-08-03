@@ -15,6 +15,8 @@ permissions:
 jobs:
   tag-and-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - name: Ensure release runs from main
         if: github.ref != 'refs/heads/main'
@@ -22,7 +24,7 @@ jobs:
           echo "Releases must be cut from the main branch."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # need tags to find the latest
 
@@ -46,3 +48,28 @@ jobs:
           gh release create "${{ steps.ver.outputs.tag }}" \
             --title "${{ steps.ver.outputs.tag }}" \
             --generate-notes
+
+  # Call the reusable publish/docker workflows directly rather than relying on
+  # the release event: GITHUB_TOKEN-created releases do not emit events, so
+  # downstream 'on: release' triggers would never fire.
+  publish:
+    needs: tag-and-release
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: ${{ needs.tag-and-release.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write # PyPI trusted publishing + MCP Registry github-oidc
+
+  docker:
+    needs: tag-and-release
+    uses: ./.github/workflows/docker.yml
+    with:
+      tag: ${{ needs.tag-and-release.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
