@@ -22,7 +22,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # <2 until the MCPServer migration: 2.x moved mcp.server.fastmcp
+    "mcp>=1.29.0,<2",
     "httpx[socks]>=0.27.0",
     "python-dotenv>=1.0.0",
     "tzdata>=2024.1",

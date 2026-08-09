@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Edit the declared ranges, not just the lock: pyproject.toml is what PyPI
+    # consumers resolve against, so a breaking release has to surface there.
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: "development"
