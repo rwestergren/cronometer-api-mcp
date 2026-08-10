@@ -12,6 +12,7 @@ endpoints.
 import json
 import logging
 import os
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -91,6 +92,11 @@ class CronometerClient:
 
     Caches the auth token in memory and reuses it across requests.
     Re-authenticates automatically when the session expires.
+
+    Thread safety: a single instance is shared across MCP tool calls, which the
+    SDK dispatches on worker threads, so several may be in flight at once.
+    Requests themselves run concurrently (httpx.Client is thread-safe); only
+    the auth state transitions are serialized. See `_auth_lock`.
     """
 
     def __init__(self, *, session_path: Path | None = None) -> None:
@@ -101,6 +107,11 @@ class CronometerClient:
         # are computed in this zone so behavior is independent of the host clock.
         self._timezone: str | None = None
         self._session_path: Path = session_path or _DEFAULT_SESSION_PATH
+        # Serializes read-modify-write of (_user_id, _token, _timezone) and the
+        # session-file writes that mirror them. Reentrant because the auth paths
+        # nest: _ensure_auth -> login -> _save_cached_session, and _request's
+        # retry does _invalidate_session -> login.
+        self._auth_lock = threading.RLock()
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
         self._nutrient_defs: dict[int, dict] | None = None
@@ -165,39 +176,41 @@ class CronometerClient:
 
     def _save_cached_session(self) -> None:
         """Persist (user_id, token, timezone) so future processes can reuse it."""
-        if self._user_id is None or self._token is None:
-            return
-        try:
-            self._session_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._session_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(
-                    {
-                        "username": self._cache_key(),
-                        "user_id": self._user_id,
-                        "token": self._token,
-                        "timezone": self._timezone,
-                    }
-                )
-            )
-            os.replace(tmp, self._session_path)
+        with self._auth_lock:
+            if self._user_id is None or self._token is None:
+                return
             try:
-                os.chmod(self._session_path, 0o600)
-            except OSError:
-                pass
-        except OSError as exc:
-            logger.warning("Failed to persist Cronometer session: %s", exc)
+                self._session_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._session_path.with_suffix(".json.tmp")
+                tmp.write_text(
+                    json.dumps(
+                        {
+                            "username": self._cache_key(),
+                            "user_id": self._user_id,
+                            "token": self._token,
+                            "timezone": self._timezone,
+                        }
+                    )
+                )
+                os.replace(tmp, self._session_path)
+                try:
+                    os.chmod(self._session_path, 0o600)
+                except OSError:
+                    pass
+            except OSError as exc:
+                logger.warning("Failed to persist Cronometer session: %s", exc)
 
     def _invalidate_session(self) -> None:
         """Drop the in-memory token and remove the cache file."""
-        self._token = None
-        self._timezone = None
-        try:
-            self._session_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            logger.debug("Could not remove cached session: %s", exc)
+        with self._auth_lock:
+            self._token = None
+            self._timezone = None
+            try:
+                self._session_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug("Could not remove cached session: %s", exc)
 
     def _get_credentials(self) -> tuple[str, str]:
         username = os.getenv("CRONOMETER_USERNAME")
@@ -209,7 +222,11 @@ class CronometerClient:
         return username, password
 
     def login(self) -> None:
-        """Authenticate with Cronometer and cache the session token."""
+        """Authenticate with Cronometer and cache the session token.
+
+        Holds the auth lock for the whole exchange, so concurrent callers queue
+        rather than each POSTing to the rate-limited login endpoint (issue #3).
+        """
         username, password = self._get_credentials()
 
         payload = {
@@ -242,32 +259,40 @@ class CronometerClient:
         }
 
         logger.info("Logging in to Cronometer as %s", username)
-        resp = self._http.post("/api/v2/login", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+        with self._auth_lock:
+            resp = self._http.post("/api/v2/login", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
-        if data.get("result") != "SUCCESS" and "sessionKey" not in data:
-            raise CronometerError(f"Login failed: {data}")
+            if data.get("result") != "SUCCESS" and "sessionKey" not in data:
+                raise CronometerError(f"Login failed: {data}")
 
-        self._user_id = data["id"]
-        self._token = data["sessionKey"]
-        # The login response embeds the account profile, including the user's
-        # configured IANA timezone. Prefer it over the host clock so diary
-        # timestamps are correct regardless of where the server runs. A
-        # CRONOMETER_ACCOUNT_TZ override, if set, wins over the response.
-        self._timezone = self._resolve_timezone(data.get("timezone"))
-        self._save_cached_session()
-        logger.info(
-            "Cronometer login successful (userId=%d, tz=%s, token=%s...)",
-            self._user_id,
-            self._timezone,
-            self._token[:8] if self._token else "???",
-        )
+            self._user_id = data["id"]
+            self._token = data["sessionKey"]
+            # The login response embeds the account profile, including the user's
+            # configured IANA timezone. Prefer it over the host clock so diary
+            # timestamps are correct regardless of where the server runs. A
+            # CRONOMETER_ACCOUNT_TZ override, if set, wins over the response.
+            self._timezone = self._resolve_timezone(data.get("timezone"))
+            self._save_cached_session()
+            logger.info(
+                "Cronometer login successful (userId=%d, tz=%s, token=%s...)",
+                self._user_id,
+                self._timezone,
+                self._token[:8] if self._token else "???",
+            )
 
     def _ensure_auth(self) -> None:
-        """Login lazily on first use."""
+        """Login lazily on first use.
+
+        Re-checks under the lock so a burst of concurrent first-calls produces
+        one login, not one per thread: the losers of the race find the token
+        the winner just stored.
+        """
         if self._token is None:
-            self.login()
+            with self._auth_lock:
+                if self._token is None:
+                    self.login()
 
     @property
     def user_id(self) -> int:
@@ -287,6 +312,23 @@ class CronometerClient:
     # Request helpers
     # ------------------------------------------------------------------
 
+    def _reauthenticate(self, stale_token: str | None) -> None:
+        """Re-login, unless another thread already replaced `stale_token`.
+
+        Concurrent requests all carrying the same expired token would otherwise
+        each invalidate and re-login in turn, and every login after the first
+        would discard a *fresh* token won by a peer. Comparing against the token
+        the caller actually sent collapses that burst into one login.
+        """
+        with self._auth_lock:
+            if self._token is not None and self._token != stale_token:
+                logger.debug(
+                    "Token already refreshed by another thread; skipping login"
+                )
+                return
+            self._invalidate_session()
+            self.login()
+
     def _request(self, endpoint: str, payload: dict, *, _retried: bool = False) -> dict:
         """Send a v2 POST request with JSON auth block. Re-authenticates once on failure.
 
@@ -297,6 +339,9 @@ class CronometerClient:
 
         payload["auth"] = self._auth_block()
         payload.setdefault("lastSeen", 0)
+        # The token this request is about to present; a 401 is only *our* stale
+        # token's fault if it is still the one on the client.
+        sent_token = payload["auth"]["token"]
 
         logger.debug("Cronometer v2 request: POST %s", endpoint)
         resp = self._http.post(endpoint, json=payload)
@@ -307,8 +352,7 @@ class CronometerClient:
                 "Cronometer auth rejected (%d), re-authenticating",
                 resp.status_code,
             )
-            self._invalidate_session()
-            self.login()
+            self._reauthenticate(sent_token)
             return self._request(endpoint, payload, _retried=True)
 
         resp.raise_for_status()
@@ -320,8 +364,7 @@ class CronometerClient:
         if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
             if not _retried:
                 logger.warning("Cronometer request failed, re-authenticating: %s", data)
-                self._invalidate_session()
-                self.login()
+                self._reauthenticate(sent_token)
                 return self._request(endpoint, payload, _retried=True)
             raise CronometerError(f"Cronometer API error: {data}")
 
@@ -357,9 +400,9 @@ class CronometerClient:
         url = f"/api/v3/user/{self.user_id}{path}"
         logger.debug("Cronometer v3 request: %s %s", method, url)
 
-        resp = self._http.request(
-            method, url, json=json_body, headers=self._v3_headers()
-        )
+        headers = self._v3_headers()
+        sent_token = headers["x-crono-session"]
+        resp = self._http.request(method, url, json=json_body, headers=headers)
 
         # Re-authenticate once on auth failures
         if resp.status_code in (401, 403) and not _retried:
@@ -367,8 +410,7 @@ class CronometerClient:
                 "Cronometer v3 auth rejected (%d), re-authenticating",
                 resp.status_code,
             )
-            self._invalidate_session()
-            self.login()
+            self._reauthenticate(sent_token)
             return self._request_v3(method, path, json_body=json_body, _retried=True)
 
         return resp

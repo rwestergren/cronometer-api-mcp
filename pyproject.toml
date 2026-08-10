@@ -22,8 +22,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    # <2 until the MCPServer migration: 2.x moved mcp.server.fastmcp
-    "mcp>=1.29.0,<2",
+    # >=2 only: server.py imports mcp.server.mcpserver, which does not exist in
+    # 1.x (and 2.x deleted mcp.server.fastmcp outright, no shim). A range
+    # spanning both majors would resolve either one and crash on import.
+    # <3 is a deliberate cap, not a default: re-read the migration guide before
+    # lifting it.
+    "mcp>=2.0.0,<3",
+    # Ours alone now: mcp 2.x switched to httpx2 and no longer installs httpx.
+    # We keep httpx (the [socks] extra backs CRONOMETER proxy support) and never
+    # hand an httpx object to the SDK, so the two co-install without touching.
     "httpx[socks]>=0.27.0",
     "python-dotenv>=1.0.0",
     "tzdata>=2024.1",

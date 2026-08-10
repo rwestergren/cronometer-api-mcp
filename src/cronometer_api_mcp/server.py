@@ -2,16 +2,35 @@
 
 import json
 import logging
+import threading
 from datetime import date, timedelta
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import CronometerClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
+
+def _server_version() -> str:
+    """Version reported in the initialize result's serverInfo.
+
+    Read from installed package metadata so the release tag (which
+    publish.yml stamps into pyproject.toml) is the single source of truth.
+    An unversioned server reports "" under MCP SDK 2.x -- v1 substituted the
+    SDK's own version -- and the field is display-only, so a missing
+    distribution degrades to that rather than failing import.
+    """
+    try:
+        return _pkg_version("cronometer-api-mcp")
+    except PackageNotFoundError:
+        return ""
+
+
+mcp = MCPServer(
     "cronometer",
     instructions=(
         "Cronometer MCP server for nutrition tracking via the mobile REST API. "
@@ -21,15 +40,25 @@ mcp = FastMCP(
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
         "review what was eaten."
     ),
+    version=_server_version(),
 )
 
 _client: CronometerClient | None = None
+# Guards the lazy construction below. MCP SDK 2.x dispatches synchronous tool
+# handlers on worker threads (anyio.to_thread.run_sync), so two concurrent
+# first-calls would otherwise both see `_client is None` and build a client
+# each -- meaning two logins against a rate-limited endpoint (issue #3).
+_client_lock = threading.Lock()
 
 
 def _get_client() -> CronometerClient:
     global _client
     if _client is None:
-        _client = CronometerClient()
+        with _client_lock:
+            # Re-check under the lock: another thread may have won the race
+            # between the check above and acquiring it.
+            if _client is None:
+                _client = CronometerClient()
     return _client
 
 
