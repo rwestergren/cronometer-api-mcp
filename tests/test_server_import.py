@@ -2,12 +2,14 @@
 
 server.py is imported by the console entry point, so an import-time failure
 takes the whole server down before it serves a request -- and nothing else in
-the suite imports it.
+the suite imports it. Issue #37 was exactly that: an SDK major bump moved the
+server class, and the crash only surfaced at startup.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 
 EXPECTED_TOOLS = {
     "add_custom_food",
@@ -41,6 +43,26 @@ def test_server_identity():
     assert mcp.name == "cronometer"
 
 
+def test_server_is_mcpserver_instance():
+    """Pins the SDK 2.x server class: 1.x's FastMCP no longer exists."""
+    from mcp.server.mcpserver import MCPServer
+
+    from cronometer_api_mcp.server import mcp
+
+    assert isinstance(mcp, MCPServer)
+
+
+def test_server_reports_a_version():
+    """serverInfo.version must not be empty.
+
+    SDK 2.x reports "" when `version=` is omitted, so the mistake is invisible
+    until a client displays it.
+    """
+    from cronometer_api_mcp.server import _server_version
+
+    assert _server_version()
+
+
 def test_registered_tools():
     """Tools register as an import side effect of the @mcp.tool() decorators.
 
@@ -56,6 +78,21 @@ def test_registered_tools():
         assert tool.description, f"{tool.name} has no description"
 
 
+def test_tool_annotations_survive_schema_coercion():
+    """The read-only hints must reach the wire model.
+
+    They are declared in camelCase (`readOnlyHint`), which SDK 2.x accepts only
+    as an input alias for the snake_case attributes. A silent coercion failure
+    would strip the hints clients use to decide what is safe to call.
+    """
+    from cronometer_api_mcp.server import mcp
+
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+    assert tools["get_food_log"].annotations.read_only_hint is True
+    assert tools["add_food_entry"].annotations.read_only_hint is False
+
+
 def test_no_client_constructed_at_import():
     """Import must not need credentials or touch the network.
 
@@ -65,3 +102,39 @@ def test_no_client_constructed_at_import():
     from cronometer_api_mcp import server
 
     assert server._client is None
+
+
+def test_concurrent_get_client_builds_one_instance(monkeypatch):
+    """SDK 2.x runs sync tools on worker threads, so _get_client() races.
+
+    Two clients would mean two logins against a rate-limited endpoint (#3) and
+    two writers for one session file.
+    """
+    from cronometer_api_mcp import server
+
+    monkeypatch.setattr(server, "_client", None)
+
+    built = []
+    threads_n = 8
+    start = threading.Barrier(threads_n)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            built.append(self)
+
+    monkeypatch.setattr(server, "CronometerClient", FakeClient)
+
+    seen = []
+
+    def worker() -> None:
+        start.wait()
+        seen.append(server._get_client())
+
+    threads = [threading.Thread(target=worker) for _ in range(threads_n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(built) == 1
+    assert {id(c) for c in seen} == {id(built[0])}
