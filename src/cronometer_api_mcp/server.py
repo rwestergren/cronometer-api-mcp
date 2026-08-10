@@ -130,7 +130,7 @@ def get_food_log(date: str | None = None) -> str:
             energy_summary = {
                 "total_target_kcal": target,
                 "consumed_kcal": consumed,
-                "remaining_kcal": int(round(target - consumed)),
+                "remaining_kcal": round(target - consumed),
             }
 
         nutrition_summary = client.get_consumed_nutrients(day)

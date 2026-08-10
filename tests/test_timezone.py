@@ -55,7 +55,7 @@ class FrozenDatetime(_dt.datetime):
     """datetime whose now() ignores the host clock and returns a fixed UTC
     instant, correctly converted into whatever tz is requested."""
 
-    _fixed_utc = _dt.datetime(2026, 7, 27, 18, 1, 30, tzinfo=_dt.timezone.utc)
+    _fixed_utc = _dt.datetime(2026, 7, 27, 18, 1, 30, tzinfo=_dt.UTC)
 
     @classmethod
     def now(cls, tz=None):

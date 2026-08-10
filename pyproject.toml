@@ -40,3 +40,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cronometer_api_mcp"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tools have to hand every failure back as a structured error string; an
+# exception escaping into the stdio stream kills the session.
+"src/cronometer_api_mcp/server.py" = ["BLE001"]
+# Diary enrichment is best-effort and degrades to an unenriched diary.
+"src/cronometer_api_mcp/client.py" = ["BLE001"]

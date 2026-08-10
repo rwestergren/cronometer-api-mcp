@@ -707,7 +707,7 @@ class CronometerClient:
         diary_data = self.get_diary(day)
         diary_entries = diary_data.get("diary", [])
 
-        id_set = set(str(eid) for eid in entry_ids)
+        id_set = {str(eid) for eid in entry_ids}
         to_delete = []
         for entry in diary_entries:
             if str(entry.get("servingId")) in id_set:
