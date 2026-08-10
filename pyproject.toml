@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     # <2 until the MCPServer migration: 2.x moved mcp.server.fastmcp
-    "mcp>=1.29.0,<2",
+    "mcp>=1.29.0,<3",
     "httpx[socks]>=0.27.0",
     "python-dotenv>=1.0.0",
     "tzdata>=2024.1",
