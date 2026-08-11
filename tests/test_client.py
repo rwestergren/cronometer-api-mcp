@@ -321,6 +321,47 @@ def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
     assert out["diary"] == original["diary"]
 
 
+# ---------------------------------------------------------------------------
+# create_custom_food: extra_nutrients
+# ---------------------------------------------------------------------------
+
+
+def test_create_custom_food_extra_nutrients_payload(tmp_path):
+    """extra_nutrients are appended, normalized to per-100g like the macros."""
+    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+
+    client.create_custom_food(
+        "Test Food",
+        calories=200,
+        protein_g=10,
+        fat_g=5,
+        carbs_g=20,
+        serving_grams=200.0,  # scale = 0.5
+        extra_nutrients={601: 30.0, 430: 10.0},  # cholesterol, vitamin K
+    )
+
+    nutrients = state["payloads"][0]["data"]["nutrients"]
+    by_id = {n["id"]: n["amount"] for n in nutrients}
+    assert by_id[601] == 15.0  # 30 * 0.5
+    assert by_id[430] == 5.0  # 10 * 0.5
+
+
+def test_create_custom_food_extra_nutrients_overlap_raises(tmp_path):
+    """Reusing an ID the named macro args already write is rejected, not
+    silently duplicated or shadowed."""
+    client, _ = make_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+
+    with pytest.raises(ValueError):
+        client.create_custom_food(
+            "Test Food",
+            calories=200,
+            protein_g=10,
+            fat_g=5,
+            carbs_g=20,
+            extra_nutrients={204: 5.0},  # fat -- already set by fat_g
+        )
+
+
 def test_enrich_diary_no_servings_skips_lookup(tmp_path):
     client = _enrich_client(tmp_path)
     calls = {"n": 0}
