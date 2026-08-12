@@ -319,6 +319,160 @@ def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
     assert out["diary"] == original["diary"]
 
 
+# ---------------------------------------------------------------------------
+# create_recipe
+#
+# Recipes post to the same /api/v2/add_food endpoint as custom foods; the
+# `ingredients` array is what makes a food a recipe. Nutrients are aggregated
+# from the ingredients' per-100g profiles and re-normalized to per-100g of the
+# finished batch. Verified against the live API (food 79474948).
+# ---------------------------------------------------------------------------
+
+RECIPE_INGREDIENT_FOODS = [
+    {
+        "id": 1000,
+        "name": "Sardines",
+        "defaultMeasureId": 11,
+        "measures": [
+            {"id": 10, "name": "oz", "value": 28.3495231, "type": "Weight"},
+            {"id": 11, "name": "g", "value": 1, "type": "Weight"},
+        ],
+        "translations": [{"translationId": 555, "name": "Sardines"}],
+        # per-100g
+        "nutrients": [{"id": 208, "amount": 200.0}, {"id": 203, "amount": 25.0}],
+    },
+    {
+        "id": 2000,
+        "name": "Marshmallow Creme",
+        "defaultMeasureId": 21,
+        "measures": [{"id": 21, "name": "g", "value": 1, "type": "Weight"}],
+        # no translations -> translationId falls back to 0
+        "nutrients": [{"id": 208, "amount": 300.0}, {"id": 205, "amount": 60.0}],
+    },
+]
+
+
+def _recipe_client(tmp_path: Path, responses=None):
+    client, state = make_cold_client(
+        tmp_path, responses or [{"result": "SUCCESS", "id": 4242}]
+    )
+    client.get_foods = lambda ids: RECIPE_INGREDIENT_FOODS  # type: ignore[method-assign]
+    return client, state
+
+
+def test_create_recipe_payload_shape(tmp_path):
+    """Ingredients, weight-based measures, and per-100g aggregate nutrients."""
+    client, state = _recipe_client(tmp_path)
+
+    result = client.create_recipe(
+        "Test Recipe", ingredients=[(1000, 100.0), (2000, 50.0)]
+    )
+
+    assert result == {"food_id": 4242, "total_grams": 150.0, "ingredient_count": 2}
+    data = state["payloads"][0]["data"]
+
+    # A new food, with ingredients -- the marker that makes it a recipe.
+    assert data["id"] == 0
+    assert data["defaultMeasureId"] == 0
+    assert data["properties"] == {"advancedServingSize": "false"}
+    assert data["ingredients"] == [
+        {
+            "id": 0,
+            "foodId": 1000,
+            "measureId": 11,  # resolved to the 1-gram measure, not defaultMeasureId
+            "translationId": 555,
+            "grams": 100.0,
+            "value": 100.0,
+        },
+        {
+            "id": 0,
+            "foodId": 2000,
+            "measureId": 21,
+            "translationId": 0,  # no translations on this food
+            "grams": 50.0,
+            "value": 50.0,
+        },
+    ]
+
+    # Weight-based: every measure is type "Weight" (not "Recipe"), so the diary
+    # treats logged amounts as real grams rather than a serving count.
+    assert [m["type"] for m in data["measures"]] == ["Weight"] * 4
+    by_name = {m["name"]: m["value"] for m in data["measures"]}
+    assert by_name == {
+        "Serving": 150.0,  # defaults to the full batch
+        "g": 1.0,
+        "oz": 28.3495231,
+        "full recipe": 150.0,
+    }
+    # The serving measure leads, since the server makes the first one default.
+    assert data["measures"][0]["name"] == "Serving"
+
+    # Batch: 200*1.0 + 300*0.5 = 350 kcal over 150g -> 233.333333 per 100g.
+    amounts = {n["id"]: n["amount"] for n in data["nutrients"]}
+    assert amounts[208] == 233.333333
+    assert amounts[203] == round(25.0 * 100 / 150, 6)  # only in the sardines
+    assert amounts[205] == round(60.0 * 50 / 150, 6)  # only in the creme
+
+
+def test_create_recipe_explicit_serving_and_comments(tmp_path):
+    client, state = _recipe_client(tmp_path)
+
+    client.create_recipe(
+        "Test Recipe",
+        ingredients=[(1000, 100.0), (2000, 50.0)],
+        serving_name="bowl",
+        serving_grams=75.0,
+        comments="wildly inadvisable",
+    )
+
+    data = state["payloads"][0]["data"]
+    assert data["measures"][0] == {
+        "id": 0,
+        "name": "bowl",
+        "value": 75.0,
+        "amount": 1.0,
+        "type": "Weight",
+    }
+    # An explicit serving size must not change the batch weight.
+    assert {m["name"]: m["value"] for m in data["measures"]}["full recipe"] == 150.0
+    assert data["comments"] == "wildly inadvisable"
+
+
+def test_create_recipe_measure_id_override(tmp_path):
+    """A 3-tuple overrides the auto-resolved display measure."""
+    client, state = _recipe_client(tmp_path)
+
+    client.create_recipe("Test Recipe", ingredients=[(1000, 100.0, 10)])
+
+    assert state["payloads"][0]["data"]["ingredients"][0]["measureId"] == 10
+
+
+def test_create_recipe_rejects_empty_and_malformed(tmp_path):
+    client, state = _recipe_client(tmp_path)
+
+    with pytest.raises(ValueError):
+        client.create_recipe("Test Recipe", ingredients=[])
+
+    with pytest.raises(ValueError):
+        client.create_recipe("Test Recipe", ingredients=[(1000,)])
+
+    with pytest.raises(ValueError):
+        client.create_recipe("Test Recipe", ingredients=[(1000, 0)])
+
+    # Validation happens before any network call.
+    assert state["post"] == 0
+
+
+def test_create_recipe_missing_ingredient_food_raises(tmp_path):
+    """An unresolvable food ID fails loudly rather than silently dropping it."""
+    client, state = _recipe_client(tmp_path)
+
+    with pytest.raises(CronometerError):
+        client.create_recipe("Test Recipe", ingredients=[(1000, 100.0), (9999, 10.0)])
+
+    assert state["post"] == 0
+
+
 def test_enrich_diary_no_servings_skips_lookup(tmp_path):
     client = _enrich_client(tmp_path)
     calls = {"n": 0}

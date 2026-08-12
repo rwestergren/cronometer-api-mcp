@@ -68,6 +68,10 @@ NUTRIENT_IDS = {
     "omega_6": 10002,
 }
 
+# Grams per ounce, matching the value Cronometer's own web client sends for the
+# "oz" measure it attaches to every recipe.
+_OZ_GRAMS = 28.3495231
+
 # Macro fields surfaced as a flat convenience block in the daily summary,
 # mapped to their nutrient IDs. These are the values most relevant when
 # summarizing a day at a glance.
@@ -598,6 +602,180 @@ class CronometerClient:
 
         logger.info("Created custom food %r (id=%d)", name, food_id)
         return {"food_id": food_id, "measure_id": None}
+
+    # ------------------------------------------------------------------
+    # Recipe creation
+    # ------------------------------------------------------------------
+
+    def create_recipe(
+        self,
+        name: str,
+        *,
+        ingredients: list[tuple],
+        serving_name: str = "Serving",
+        serving_grams: float | None = None,
+        comments: str | None = None,
+    ) -> dict:
+        """Create a recipe -- a food composed of other foods -- in Cronometer.
+
+        Recipes go through the same /api/v2/add_food endpoint as custom foods;
+        what makes a food a recipe is the presence of an `ingredients` array.
+        Each ingredient references another food by ID plus a gram weight, and
+        the recipe stores a nutrient profile aggregated from those ingredients.
+
+        This creates a *weight-based* recipe: measures are type "Weight" and
+        nutrients are stored per-100g, matching create_custom_food's convention.
+        (Cronometer's other mode, "serving-based", uses type "Recipe" measures
+        and stores nutrients per full batch, which makes the diary's `grams`
+        field a serving count instead of real grams -- see
+        enrich_diary_servings. Weight-based avoids that quirk entirely.)
+
+        Args:
+            name: Recipe name.
+            ingredients: List of (food_id, grams) tuples, or
+                (food_id, grams, measure_id) to override the ingredient's
+                display measure. The measure only affects how the amount is
+                rendered in Cronometer's UI (amount = grams / measure value);
+                `grams` is always what the nutrient math uses. When omitted,
+                the ingredient's own gram measure is resolved automatically.
+            serving_name: Name of the default serving measure.
+            serving_grams: Grams in one serving. Defaults to the full batch
+                weight (i.e. one serving = the whole recipe).
+            comments: Free-text recipe notes.
+
+        Returns {"food_id": int, "total_grams": float, "ingredient_count": int}.
+        """
+        if not ingredients:
+            raise ValueError("create_recipe requires at least one ingredient")
+
+        # Normalize to (food_id, grams, measure_id|None) and validate up front so
+        # a malformed entry fails before any network call.
+        parsed: list[tuple[int, float, int | None]] = []
+        for item in ingredients:
+            if len(item) == 2:
+                food_id, grams = item
+                measure_id = None
+            elif len(item) == 3:
+                food_id, grams, measure_id = item
+            else:
+                raise ValueError(
+                    f"Each ingredient must be (food_id, grams) or "
+                    f"(food_id, grams, measure_id); got {item!r}"
+                )
+            if grams <= 0:
+                raise ValueError(
+                    f"Ingredient grams must be positive; food {food_id} got {grams!r}"
+                )
+            parsed.append((int(food_id), float(grams), measure_id))
+
+        total_grams = sum(g for _, g, _ in parsed)
+
+        # One batch call resolves every ingredient's measures, translation, and
+        # per-100g nutrient profile.
+        foods = self.get_foods([fid for fid, _, _ in parsed])
+        food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
+        missing = [fid for fid, _, _ in parsed if fid not in food_by_id]
+        if missing:
+            raise CronometerError(f"Ingredient food IDs not found: {missing}")
+
+        ingredient_rows: list[dict] = []
+        batch_totals: dict[int, float] = {}
+        for food_id, grams, measure_id in parsed:
+            food = food_by_id[food_id]
+            if measure_id is None:
+                measure_id = _gram_measure_id(food)
+            ingredient_rows.append(
+                {
+                    "id": 0,
+                    "foodId": food_id,
+                    "measureId": measure_id,
+                    "translationId": _translation_id(food),
+                    "grams": grams,
+                    "value": grams,
+                }
+            )
+            # Ingredient nutrients are per-100g; accumulate the batch total.
+            for n in food.get("nutrients", []):
+                if not isinstance(n, dict):
+                    continue
+                nid = n.get("id")
+                amount = n.get("amount")
+                if nid is None or not isinstance(amount, (int, float)):
+                    continue
+                batch_totals[nid] = batch_totals.get(nid, 0.0) + amount * grams / 100.0
+
+        # Cronometer stores recipe nutrients per-100g of the finished batch.
+        scale = 100.0 / total_grams
+        nutrients = [
+            {"id": nid, "amount": round(amount * scale, 6)}
+            for nid, amount in sorted(batch_totals.items())
+        ]
+
+        # The first measure in the array becomes the server-assigned
+        # defaultMeasureId, so the serving measure leads.
+        measures = [
+            {
+                "id": 0,
+                "name": serving_name,
+                "value": total_grams if serving_grams is None else serving_grams,
+                "amount": 1.0,
+                "type": "Weight",
+            },
+            {"id": 0, "name": "g", "value": 1.0, "amount": 1.0, "type": "Weight"},
+            {
+                "id": 0,
+                "name": "oz",
+                "value": _OZ_GRAMS,
+                "amount": 1.0,
+                "type": "Weight",
+            },
+            {
+                "id": 0,
+                "name": "full recipe",
+                "value": total_grams,
+                "amount": 1.0,
+                "type": "Weight",
+            },
+        ]
+
+        payload = {
+            "data": {
+                "id": 0,
+                "name": name,
+                "category": 0,
+                "owner": None,
+                "retired": None,
+                "source": None,
+                "defaultMeasureId": 0,
+                "comments": comments,
+                "alternateId": None,
+                "ingredients": ingredient_rows,
+                "measures": measures,
+                "labelType": "AMERICAN_2016",
+                "nutrients": nutrients,
+                "properties": {"advancedServingSize": "false"},
+                "foodTags": [],
+            },
+            "config": {"call_version": 1},
+        }
+
+        data = self._request("/api/v2/add_food", payload)
+        food_id = data.get("id")
+        if not food_id:
+            raise CronometerError(f"Failed to create recipe: {data}")
+
+        logger.info(
+            "Created recipe %r (id=%d, %d ingredients, %.1fg batch)",
+            name,
+            food_id,
+            len(ingredient_rows),
+            total_grams,
+        )
+        return {
+            "food_id": food_id,
+            "total_grams": total_grams,
+            "ingredient_count": len(ingredient_rows),
+        }
 
     # ------------------------------------------------------------------
     # Diary: add serving
@@ -1192,6 +1370,31 @@ class CronometerClient:
 # ======================================================================
 # Helpers
 # ======================================================================
+
+
+def _gram_measure_id(food: dict) -> int:
+    """Return the food's gram measure ID, for use as a recipe ingredient.
+
+    Ingredient measures are display metadata -- Cronometer renders the amount
+    as grams / measure value -- so the 1-gram measure makes the UI show the
+    gram weight directly. Falls back to the food's default measure when no
+    gram measure exists, since `grams` is what the nutrient math uses either
+    way.
+    """
+    for m in food.get("measures", []):
+        if isinstance(m, dict) and m.get("name") == "g" and m.get("value") == 1:
+            return m["id"]
+    return food.get("defaultMeasureId") or 0
+
+
+def _translation_id(food: dict) -> int:
+    """Return the food's primary translation ID, or 0 if it has none."""
+    translations = food.get("translations")
+    if isinstance(translations, list) and translations:
+        first = translations[0]
+        if isinstance(first, dict):
+            return first.get("translationId") or 0
+    return 0
 
 
 def _meal_group_for_hour(hour: int) -> int:
