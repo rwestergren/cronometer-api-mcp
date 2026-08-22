@@ -2,16 +2,33 @@
 
 import json
 import logging
+import threading
 from datetime import date, timedelta
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import CronometerClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
+
+def _server_version() -> str:
+    """Version reported in serverInfo.
+
+    Read from installed package metadata so the release tag (which publish.yml
+    stamps into pyproject.toml) is the single source of truth. The field is
+    display-only, so a missing distribution degrades to "" rather than failing.
+    """
+    try:
+        return _pkg_version("cronometer-api-mcp")
+    except PackageNotFoundError:
+        return ""
+
+
+mcp = MCPServer(
     "cronometer",
     instructions=(
         "Cronometer MCP server for nutrition tracking via the mobile REST API. "
@@ -21,15 +38,23 @@ mcp = FastMCP(
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
         "review what was eaten."
     ),
+    version=_server_version(),
 )
 
 _client: CronometerClient | None = None
+# Guards the lazy construction below. SDK 2.x dispatches sync tool handlers on
+# worker threads, so concurrent first-calls would otherwise build a client each,
+# meaning two logins against a rate-limited endpoint (#3).
+_client_lock = threading.Lock()
 
 
 def _get_client() -> CronometerClient:
     global _client
     if _client is None:
-        _client = CronometerClient()
+        with _client_lock:
+            # Re-check: another thread may have won the race to the lock.
+            if _client is None:
+                _client = CronometerClient()
     return _client
 
 
@@ -524,6 +549,7 @@ def add_custom_food(
     sugar_g: float = 0,
     sodium_mg: float = 0,
     saturated_fat_g: float = 0,
+    extra_nutrients: dict[int, float] | None = None,
     serving_name: str = "1 serving",
     serving_grams: float = 100.0,
 ) -> str:
@@ -542,6 +568,12 @@ def add_custom_food(
         sugar_g: Sugar per serving (g, default 0).
         sodium_mg: Sodium per serving (mg, default 0).
         saturated_fat_g: Saturated fat per serving (g, default 0).
+        extra_nutrients: Additional nutrients beyond the core macros above
+            (vitamins, minerals, amino acids, etc.), keyed by Cronometer
+            nutrient ID (from get_daily_nutrition, which pairs each id with
+            its name) and valued per the full serving. IDs aren't validated,
+            so a wrong one writes the wrong nutrient; must not reuse an ID the
+            named macro args already cover.
         serving_name: Name for the serving size (default "1 serving").
         serving_grams: Weight of one serving in grams (default 100).
     """
@@ -557,6 +589,7 @@ def add_custom_food(
             sugar_g=sugar_g,
             sodium_mg=sodium_mg,
             saturated_fat_g=saturated_fat_g,
+            extra_nutrients=extra_nutrients,
             serving_name=serving_name,
             serving_grams=serving_grams,
         )
