@@ -8,6 +8,8 @@ the failure was surfaced to callers as a success.
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -334,3 +336,130 @@ def test_enrich_diary_no_servings_skips_lookup(tmp_path):
     )
     assert calls["n"] == 0
     assert out["diary"] == [{"type": "Exercise", "name": "Running"}]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent auth (MCP SDK 2.x)
+#
+# The SDK runs sync tool handlers on worker threads, so tool calls share one
+# client concurrently where 1.x serialized them. Auth is a read-modify-write
+# over (_user_id, _token, _timezone) plus a session-file write, so an unguarded
+# burst logs in once per thread against a rate-limited endpoint (#3).
+# ---------------------------------------------------------------------------
+
+THREADS = 8
+
+
+def test_concurrent_cold_start_logs_in_once(tmp_path):
+    """A burst of first-calls on a cold client triggers exactly one login."""
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = None
+    client._token = None
+
+    state = {"login": 0}
+    start = threading.Barrier(THREADS)
+
+    def fake_login() -> None:
+        # Widen the race window: without the lock every thread has already
+        # passed the `_token is None` check by the time the first one stores.
+        state["login"] += 1
+        time.sleep(0.05)
+        client._user_id = 42
+        client._token = "FRESH_TOKEN"
+
+    client.login = fake_login  # type: ignore[method-assign]
+
+    def worker() -> None:
+        start.wait()
+        client._ensure_auth()
+
+    threads = [threading.Thread(target=worker) for _ in range(THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert state["login"] == 1
+    assert client._token == "FRESH_TOKEN"
+
+
+def test_concurrent_expired_token_logs_in_once(tmp_path):
+    """Concurrent 401s on one stale token collapse into a single re-login."""
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 123
+    client._token = "STALE_TOKEN"
+
+    state = {"login": 0}
+    lock = threading.Lock()
+    start = threading.Barrier(THREADS)
+
+    def fake_login() -> None:
+        with lock:
+            state["login"] += 1
+            n = state["login"]
+        time.sleep(0.05)
+        client._user_id = 123
+        client._token = f"FRESH_TOKEN_{n}"
+
+    def fake_post(endpoint, json=None):
+        # Reject the stale token, accept anything issued by a login.
+        if json["auth"]["token"] == "STALE_TOKEN":
+            return FakeResp(REAL_FAIL_BODY)
+        return FakeResp({"result": "SUCCESS"})
+
+    client.login = fake_login  # type: ignore[method-assign]
+    client._http.post = fake_post  # type: ignore[method-assign]
+
+    results = []
+
+    def worker() -> None:
+        start.wait()
+        results.append(client._request("/api/v2/get_diary", {}))
+
+    threads = [threading.Thread(target=worker) for _ in range(THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert state["login"] == 1
+    assert results == [{"result": "SUCCESS"}] * THREADS
+
+
+def test_reauthenticate_skips_login_when_token_already_refreshed(tmp_path):
+    """A caller holding an already-replaced token must not force a new login."""
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 123
+    client._token = "FRESH_TOKEN"
+
+    state = {"login": 0}
+
+    def fake_login() -> None:
+        state["login"] += 1
+
+    client.login = fake_login  # type: ignore[method-assign]
+
+    client._reauthenticate("STALE_TOKEN")
+
+    assert state["login"] == 0
+    assert client._token == "FRESH_TOKEN"
+
+
+def test_reauthenticate_logs_in_when_token_is_still_stale(tmp_path):
+    """The thread that actually holds the current (stale) token does re-login."""
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 123
+    client._token = "STALE_TOKEN"
+
+    state = {"login": 0}
+
+    def fake_login() -> None:
+        state["login"] += 1
+        client._token = "FRESH_TOKEN"
+
+    client.login = fake_login  # type: ignore[method-assign]
+
+    client._reauthenticate("STALE_TOKEN")
+
+    assert state["login"] == 1
+    assert client._token == "FRESH_TOKEN"

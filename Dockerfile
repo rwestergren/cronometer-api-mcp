@@ -51,6 +51,10 @@ RUN uv python install 3.14 \
 # in supergateway's own node_modules to a release that covers the versions the
 # Python `mcp` package negotiates.
 #
+# Python mcp 2.x still handshakes at 2025-11-25, which this Node SDK range
+# covers; its 2026-07-28 revision is reachable only via `server/discover`.
+# Re-check this pin only if a release adds a *handshake* version.
+#
 # NOTE: this is a per-image mitigation, not the durable fix. supergateway
 # proxies `initialize` verbatim but then validates the negotiated version
 # against its own (possibly older) SDK, so the skew recurs whenever the wrapped

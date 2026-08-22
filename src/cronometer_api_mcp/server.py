@@ -2,16 +2,33 @@
 
 import json
 import logging
+import threading
 from datetime import date, timedelta
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import CronometerClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
+
+def _server_version() -> str:
+    """Version reported in serverInfo.
+
+    Read from installed package metadata so the release tag (which publish.yml
+    stamps into pyproject.toml) is the single source of truth. The field is
+    display-only, so a missing distribution degrades to "" rather than failing.
+    """
+    try:
+        return _pkg_version("cronometer-api-mcp")
+    except PackageNotFoundError:
+        return ""
+
+
+mcp = MCPServer(
     "cronometer",
     instructions=(
         "Cronometer MCP server for nutrition tracking via the mobile REST API. "
@@ -21,15 +38,23 @@ mcp = FastMCP(
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
         "review what was eaten."
     ),
+    version=_server_version(),
 )
 
 _client: CronometerClient | None = None
+# Guards the lazy construction below. SDK 2.x dispatches sync tool handlers on
+# worker threads, so concurrent first-calls would otherwise build a client each,
+# meaning two logins against a rate-limited endpoint (#3).
+_client_lock = threading.Lock()
 
 
 def _get_client() -> CronometerClient:
     global _client
     if _client is None:
-        _client = CronometerClient()
+        with _client_lock:
+            # Re-check: another thread may have won the race to the lock.
+            if _client is None:
+                _client = CronometerClient()
     return _client
 
 
