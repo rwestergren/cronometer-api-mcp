@@ -611,6 +611,84 @@ def add_custom_food(
 
 
 # ------------------------------------------------------------------
+# Recipe creation
+# ------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+def add_recipe(
+    name: str,
+    ingredients: list[dict],
+    serving_name: str = "Serving",
+    serving_grams: float | None = None,
+    comments: str | None = None,
+) -> str:
+    """Create a recipe in Cronometer from other foods in the database.
+
+    Unlike add_custom_food, which takes hand-entered nutrition, a recipe
+    references existing foods by ID and Cronometer derives the full nutrient
+    profile (including micronutrients) from those ingredients.
+
+    Use search_foods to find each ingredient's food_id. After creation, use
+    the returned food_id with add_food_entry to log it.
+
+    Args:
+        name: Recipe name.
+        ingredients: List of {"food_id": int, "grams": float} objects, one per
+            ingredient. An optional "measure_id" overrides the unit shown in
+            Cronometer's UI; "grams" always drives the nutrition math.
+        serving_name: Name of the default serving measure (default "Serving").
+        serving_grams: Grams in one serving. Defaults to the full batch weight
+            (one serving = the whole recipe).
+        comments: Free-text recipe notes.
+    """
+    try:
+        parsed = []
+        for item in ingredients:
+            if "food_id" not in item or "grams" not in item:
+                return _err(
+                    ValueError(
+                        f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
+                    )
+                )
+            if item.get("measure_id") is not None:
+                parsed.append((item["food_id"], item["grams"], item["measure_id"]))
+            else:
+                parsed.append((item["food_id"], item["grams"]))
+
+        client = _get_client()
+        result = client.create_recipe(
+            name,
+            ingredients=parsed,
+            serving_name=serving_name,
+            serving_grams=serving_grams,
+            comments=comments,
+        )
+
+        # Fetch back to get the server-assigned measure_id
+        food_data = client.get_food(result["food_id"])
+        return _ok(
+            {
+                "food_id": result["food_id"],
+                "measure_id": food_data.get("defaultMeasureId"),
+                "name": name,
+                "total_grams": result["total_grams"],
+                "ingredient_count": result["ingredient_count"],
+                "note": "Use food_id and measure_id with add_food_entry to log this recipe.",
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
+# ------------------------------------------------------------------
 # Macro targets
 # ------------------------------------------------------------------
 

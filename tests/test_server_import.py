@@ -14,6 +14,7 @@ import threading
 EXPECTED_TOOLS = {
     "add_custom_food",
     "add_food_entry",
+    "add_recipe",
     "copy_day",
     "get_biometrics",
     "get_daily_nutrition",
