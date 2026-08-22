@@ -569,10 +569,11 @@ def add_custom_food(
         sodium_mg: Sodium per serving (mg, default 0).
         saturated_fat_g: Saturated fat per serving (g, default 0).
         extra_nutrients: Additional nutrients beyond the core macros above
-            (vitamins, minerals, amino acids, individual fatty acids, etc.),
-            keyed by Cronometer nutrient ID and valued per the full serving
-            like the other args. Must not reuse an ID already covered by the
-            named macro args.
+            (vitamins, minerals, amino acids, etc.), keyed by Cronometer
+            nutrient ID (from get_daily_nutrition, which pairs each id with
+            its name) and valued per the full serving. IDs aren't validated,
+            so a wrong one writes the wrong nutrient; must not reuse an ID the
+            named macro args already cover.
         serving_name: Name for the serving size (default "1 serving").
         serving_grams: Weight of one serving in grams (default 100).
     """
