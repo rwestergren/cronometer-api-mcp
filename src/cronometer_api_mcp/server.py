@@ -549,6 +549,7 @@ def add_custom_food(
     sugar_g: float = 0,
     sodium_mg: float = 0,
     saturated_fat_g: float = 0,
+    extra_nutrients: dict[int, float] | None = None,
     serving_name: str = "1 serving",
     serving_grams: float = 100.0,
 ) -> str:
@@ -567,6 +568,12 @@ def add_custom_food(
         sugar_g: Sugar per serving (g, default 0).
         sodium_mg: Sodium per serving (mg, default 0).
         saturated_fat_g: Saturated fat per serving (g, default 0).
+        extra_nutrients: Additional nutrients beyond the core macros above
+            (vitamins, minerals, amino acids, etc.), keyed by Cronometer
+            nutrient ID (from get_daily_nutrition, which pairs each id with
+            its name) and valued per the full serving. IDs aren't validated,
+            so a wrong one writes the wrong nutrient; must not reuse an ID the
+            named macro args already cover.
         serving_name: Name for the serving size (default "1 serving").
         serving_grams: Weight of one serving in grams (default 100).
     """
@@ -582,6 +589,7 @@ def add_custom_food(
             sugar_g=sugar_g,
             sodium_mg=sodium_mg,
             saturated_fat_g=saturated_fat_g,
+            extra_nutrients=extra_nutrients,
             serving_name=serving_name,
             serving_grams=serving_grams,
         )

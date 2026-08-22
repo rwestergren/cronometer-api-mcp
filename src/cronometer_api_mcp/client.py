@@ -69,6 +69,27 @@ NUTRIENT_IDS = {
     "omega_6": 10002,
 }
 
+# Nutrient IDs create_custom_food() already writes via its named macro args
+# (including the derived/negative-ID duplicates it sends alongside them).
+# extra_nutrients must not reuse one of these -- see create_custom_food().
+_RESERVED_CUSTOM_FOOD_NUTRIENT_IDS = frozenset(
+    {
+        NUTRIENT_IDS["energy"],
+        NUTRIENT_IDS["protein"],
+        NUTRIENT_IDS["fat"],
+        NUTRIENT_IDS["carbs"],
+        NUTRIENT_IDS["fiber"],
+        NUTRIENT_IDS["sugar"],
+        NUTRIENT_IDS["sodium"],
+        NUTRIENT_IDS["saturated_fat"],
+        NUTRIENT_IDS["net_carbs"],
+        -203,
+        -204,
+        -205,
+        -221,
+    }
+)
+
 # Macro fields surfaced as a flat convenience block in the daily summary,
 # mapped to their nutrient IDs. These are the values most relevant when
 # summarizing a day at a glance.
@@ -559,6 +580,7 @@ class CronometerClient:
         sugar_g: float = 0,
         sodium_mg: float = 0,
         saturated_fat_g: float = 0,
+        extra_nutrients: dict[int, float] | None = None,
         serving_name: str = "1 serving",
         serving_grams: float = 100.0,
     ) -> dict:
@@ -567,6 +589,17 @@ class CronometerClient:
         Nutrient amounts are per the full serving (serving_grams).
         They are normalized to per-100g internally, since Cronometer stores
         all nutrient data on a per-100g basis.
+
+        Args:
+            extra_nutrients: Additional nutrients beyond the core macros above
+                (vitamins, minerals, amino acids, individual fatty acids,
+                etc.), keyed by Cronometer nutrient ID and valued per the full
+                serving like the named macro args. Use get_nutrient_definitions()
+                to look up IDs -- the account's full nutrient catalog (~95
+                entries) rather than the small NUTRIENT_IDS convenience map.
+                Must not reuse an ID already written by the named macro args
+                above; doing so raises ValueError rather than silently
+                duplicating or shadowing an entry.
 
         Returns {"food_id": int, "measure_id": int | None}.
         """
@@ -594,6 +627,19 @@ class CronometerClient:
             {"id": -221, "amount": 0},  # alcohol
             {"id": NUTRIENT_IDS["net_carbs"], "amount": round(net_carbs * scale, 2)},
         ]
+
+        if extra_nutrients:
+            overlap = set(extra_nutrients) & _RESERVED_CUSTOM_FOOD_NUTRIENT_IDS
+            if overlap:
+                raise ValueError(
+                    f"extra_nutrients overlaps IDs already set by the named "
+                    f"macro args: {sorted(overlap)}. Use the named args for "
+                    f"those instead."
+                )
+            nutrients.extend(
+                {"id": nid, "amount": round(amount * scale, 2)}
+                for nid, amount in extra_nutrients.items()
+            )
 
         payload = {
             "data": {
