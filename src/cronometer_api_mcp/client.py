@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -106,6 +107,13 @@ SUMMARY_MACRO_IDS = {
     "fiber": 291,
     "alcohol": 221,
 }
+
+# Recipe import is the API's one async job: import_recipe returns a future id,
+# poll_async_result is polled until it attaches a `result`.
+_IMPORT_RECIPE_ENDPOINT = "/api/v2/import_recipe"
+_POLL_ASYNC_ENDPOINT = "/api/v2/poll_async_result"
+_RECIPE_RESULT_TYPE = "recipe"
+_IMPORT_COMPLETE_PROGRESS = 100
 
 
 class CronometerError(Exception):
@@ -854,6 +862,188 @@ class CronometerClient:
             "total_grams": total_grams,
             "ingredient_count": len(ingredient_rows),
         }
+
+    # ------------------------------------------------------------------
+    # Recipe import (free-text ingredients)
+    # ------------------------------------------------------------------
+
+    def import_recipe(
+        self,
+        ingredients_text: str,
+        *,
+        name: str | None = None,
+        save: bool = True,
+        poll_interval: float = 1.0,
+        timeout: float = 60.0,
+    ) -> dict:
+        """Import a recipe from a free-text ingredient list.
+
+        The app's "Import Recipe" feature. Where create_recipe needs a food ID
+        and gram weight per ingredient, this hands raw lines ("2 tbsp ketchup")
+        to Cronometer's parser, which does the food matching and unit-to-gram
+        conversion. Matching is fuzzy, so callers should review the results.
+
+        The import is async: the server returns a future id which this polls
+        until complete. Matches are then saved via create_recipe.
+
+        Args:
+            ingredients_text: Ingredient lines separated by newlines.
+            name: Recipe name. Defaults to the server-generated one.
+            save: When False, parse only and skip persistence.
+            poll_interval: Seconds between poll attempts.
+            timeout: Give up after this many seconds of polling.
+
+        Returns "recipe_name", "ingredients" (usable matches), and "unmatched".
+        When save=True, also create_recipe's "food_id", "total_grams", and
+        "ingredient_count".
+        """
+        if not ingredients_text or not ingredients_text.strip():
+            raise ValueError("import_recipe requires at least one ingredient line")
+
+        started = self._start_recipe_import(ingredients_text)
+        result = self._await_async_result(
+            started,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+
+        recipe = result.get("recipe") or {}
+        recipe_name = name or recipe.get("name") or "Imported recipe"
+
+        matched, unmatched = self._split_import_entries(result.get("entries") or [])
+
+        out: dict = {
+            "recipe_name": recipe_name,
+            "ingredients": matched,
+            "unmatched": unmatched,
+        }
+        if not save:
+            return out
+
+        if not matched:
+            raise CronometerError(
+                "Recipe import matched no usable ingredients; "
+                f"unresolved lines: {[u['raw_text'] for u in unmatched]}"
+            )
+
+        created = self.create_recipe(
+            recipe_name,
+            ingredients=[(m["food_id"], m["grams"], m["measure_id"]) for m in matched],
+        )
+        return out | created
+
+    def _start_recipe_import(self, ingredients_text: str) -> dict:
+        """Kick off an async recipe import and return the initial job state."""
+        payload = {
+            # An empty url means "parse the text"; the app sends both fields.
+            "url": "",
+            "ingredients": ingredients_text,
+            "enable_async": True,
+            "config": {"call_version": 1},
+        }
+        data = self._request(_IMPORT_RECIPE_ENDPOINT, payload)
+        self._raise_if_job_failed(data, "start recipe import")
+
+        if not data.get("id"):
+            raise CronometerError(f"Recipe import returned no job id: {data}")
+
+        logger.info("Started recipe import (job=%s)", data["id"])
+        return data
+
+    def _await_async_result(
+        self,
+        started: dict,
+        *,
+        poll_interval: float,
+        timeout: float,
+    ) -> dict:
+        """Poll an async job until it attaches a result, or fail loudly.
+
+        Small imports can complete on the initial response, so it's checked
+        before the first sleep.
+        """
+        future_id = started["id"]
+        data = started
+        deadline = time.monotonic() + timeout
+
+        while True:
+            result = data.get("result")
+            if result:
+                logger.info("Recipe import job %s completed", future_id)
+                return result
+
+            # 100% can arrive on the same response as the result, so only
+            # "done but empty" is an error.
+            if data.get("progress") == _IMPORT_COMPLETE_PROGRESS:
+                raise CronometerError(
+                    f"Recipe import job {future_id} finished without a result: {data}"
+                )
+
+            if time.monotonic() >= deadline:
+                raise CronometerError(
+                    f"Recipe import job {future_id} did not finish within "
+                    f"{timeout:g}s (last progress: {data.get('progress')!r}, "
+                    f"{data.get('message')!r})"
+                )
+
+            time.sleep(poll_interval)
+            data = self._request(
+                _POLL_ASYNC_ENDPOINT,
+                {
+                    "futureId": future_id,
+                    "resultType": _RECIPE_RESULT_TYPE,
+                    "config": {"call_version": 1},
+                },
+            )
+            self._raise_if_job_failed(data, f"poll recipe import job {future_id}")
+            logger.debug(
+                "Recipe import %s: %s%% %s",
+                future_id,
+                data.get("progress"),
+                data.get("message"),
+            )
+
+    @staticmethod
+    def _raise_if_job_failed(data: dict, action: str) -> None:
+        """Async endpoints signal failure with isError plus a message."""
+        if data.get("isError"):
+            message = data.get("message") or data.get("messages") or data
+            raise CronometerError(f"Failed to {action}: {message}")
+
+    @staticmethod
+    def _split_import_entries(entries: list) -> tuple[list[dict], list[dict]]:
+        """Split parser entries into usable matches and unresolved lines.
+
+        Entries with no food or a non-positive weight are held back, since
+        create_recipe's gram validation would reject the whole batch.
+        """
+        matched: list[dict] = []
+        unmatched: list[dict] = []
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ingredient = entry.get("ingredient") or {}
+            food_id = ingredient.get("foodId")
+            grams = ingredient.get("grams")
+            row = {
+                "raw_text": entry.get("rawIngredientImport"),
+                "description": entry.get("description"),
+                "food_id": food_id,
+                "measure_id": ingredient.get("measureId"),
+                "grams": grams,
+                # False when the server couldn't map the stated unit onto a
+                # real serving size and guessed.
+                "serving_size_match": entry.get("servingSizeMatchFound"),
+                "alternate_food_ids": entry.get("topKFoodIds") or [],
+            }
+
+            if food_id and isinstance(grams, (int, float)) and grams > 0:
+                matched.append(row)
+            else:
+                unmatched.append(row)
+
+        return matched, unmatched
 
     # ------------------------------------------------------------------
     # Diary: add serving
