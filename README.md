@@ -117,6 +117,8 @@ cached session, so it also overrides a stale cached timezone.
 | `add_food_entry` | Log a food serving to the diary |
 | `remove_food_entry` | Remove one or more diary entries |
 | `add_custom_food` | Create a custom food with specified nutrition |
+| `add_recipe` | Create a recipe from existing foods referenced by ID and gram weight |
+| `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
 
@@ -165,6 +167,8 @@ The API uses two protocols:
 - **v2 (`POST /api/v2/*`)** -- JSON-body auth, used for most operations (food search, diary read/write, nutrition, fasting, macros, biometrics)
 - **v3 (`DELETE /api/v3/user/{id}/*`)** -- Header-based auth (`x-crono-session`), used for diary entry deletion
 
+Recipe import is the one asynchronous operation: `import_recipe` returns a job id, and `poll_async_result` is polled until the server reports 100% progress and attaches the parsed ingredients.
+
 ## Python API
 
 You can use the client directly:
@@ -190,6 +194,13 @@ client.add_serving(
 
 # Get today's diary
 diary = client.get_diary()
+
+# Import a recipe from a free-text ingredient list
+recipe = client.import_recipe("one hot dog\nketchup\nbun")
+print(recipe["food_id"], recipe["ingredients"])
+
+# Parse without saving, to review the matches first
+preview = client.import_recipe("2 tbsp olive oil\n200g chicken", save=False)
 
 # Get nutrition scores
 scores = client.get_nutrition_scores()

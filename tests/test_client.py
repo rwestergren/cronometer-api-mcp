@@ -476,6 +476,355 @@ def test_create_recipe_missing_ingredient_food_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# import_recipe
+#
+# Async flow: import_recipe returns a future id, poll_async_result is polled
+# until it attaches a result, then matches are saved via add_food. Fixtures are
+# the real bodies captured from the app for "one hot dog\nketchup\nbun".
+# Verified against the live API (food 81033679).
+# ---------------------------------------------------------------------------
+
+IMPORT_JOB_ID = "69326e05-6f0e-4227-bd13-7a21e0fee9d6"
+
+IMPORT_STARTED = {
+    "isError": False,
+    "progress": 0,
+    "messages": [],
+    "id": IMPORT_JOB_ID,
+    "message": "Preparing your recipe for import.",
+    "userId": 6407976,
+}
+
+IMPORT_IN_PROGRESS = {
+    "isError": False,
+    "progress": 10,
+    "messages": [],
+    "id": IMPORT_JOB_ID,
+    "message": "Searching our database for the ingredients...",
+    "userId": 6407976,
+}
+
+
+def _import_entry(raw, description, food_id, measure_id, grams, top_k):
+    return {
+        "amountSearchString": "Optional[1.0]",
+        "unitSearchString": "",
+        "ingredient": {
+            "measureId": measure_id,
+            "translationId": 0,
+            "foodId": food_id,
+            "id": 0,
+            "grams": grams,
+            "value": grams,
+        },
+        "rawIngredientImport": raw,
+        "description": description,
+        "topKFoodIds": top_k,
+        "servingSizeMatchFound": True,
+    }
+
+
+IMPORT_ENTRIES = [
+    _import_entry(
+        "one hot dog", "hot dog", 4572, 12695, 45, [4572, 449773, 459646, 461995]
+    ),
+    _import_entry("ketchup", "ketchup", 449782, 992859, 1, [449782, 11239521, 4387294]),
+    _import_entry("bun", "bun", 456806, 1030841, 43, [456806, 461989, 33638819]),
+]
+
+IMPORT_COMPLETE = {
+    "result": {
+        "entries": IMPORT_ENTRIES,
+        "recipe": {
+            "name": "Classic Hot Dog Bun",
+            "id": 0,
+            "ingredients": [e["ingredient"] for e in IMPORT_ENTRIES],
+        },
+    },
+    "isError": False,
+    "progress": 100,
+    "messages": [],
+    "id": IMPORT_JOB_ID,
+    "message": "Finishing Up",
+    "userId": 6407976,
+}
+
+# Ingredient foods the saved recipe resolves against, keyed to the captured IDs.
+IMPORT_INGREDIENT_FOODS = [
+    {
+        "id": 4572,
+        "name": "Hot Dog",
+        "measures": [{"id": 12695, "name": "g", "value": 1, "type": "Weight"}],
+        "nutrients": [{"id": 208, "amount": 290.0}],
+    },
+    {
+        "id": 449782,
+        "name": "Ketchup",
+        "measures": [{"id": 992859, "name": "g", "value": 1, "type": "Weight"}],
+        "nutrients": [{"id": 208, "amount": 100.0}],
+    },
+    {
+        "id": 456806,
+        "name": "Bun",
+        "measures": [{"id": 1030841, "name": "g", "value": 1, "type": "Weight"}],
+        "nutrients": [{"id": 208, "amount": 280.0}],
+    },
+]
+
+
+def _import_client(tmp_path: Path, monkeypatch, poll_bodies):
+    """Client whose async-job endpoints replay `poll_bodies` in order.
+
+    Routes by endpoint so the trailing add_food save is recorded separately
+    from polling traffic. time.sleep is neutered to keep the loop instant.
+    """
+    monkeypatch.setattr("cronometer_api_mcp.client.time.sleep", lambda _s: None)
+
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 42
+    client._token = "TOKEN"
+    client.get_foods = lambda ids: IMPORT_INGREDIENT_FOODS  # type: ignore[method-assign]
+
+    state = {"calls": [], "polls": 0, "add_food": []}
+    remaining = list(poll_bodies)
+
+    def fake_post(endpoint, json=None):
+        state["calls"].append(endpoint)
+        if endpoint == "/api/v2/add_food":
+            state["add_food"].append(json)
+            return FakeResp({"result": "SUCCESS", "id": 76533895})
+        if endpoint in ("/api/v2/import_recipe", "/api/v2/poll_async_result"):
+            if endpoint == "/api/v2/poll_async_result":
+                state["polls"] += 1
+            return FakeResp(remaining.pop(0) if remaining else poll_bodies[-1])
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+    client._http.post = fake_post  # type: ignore[method-assign]
+    return client, state
+
+
+def test_import_recipe_parses_polls_and_saves(tmp_path, monkeypatch):
+    """Happy path: start, poll past an in-progress tick, then save the match."""
+    client, state = _import_client(
+        tmp_path,
+        monkeypatch,
+        [IMPORT_STARTED, IMPORT_IN_PROGRESS, IMPORT_COMPLETE],
+    )
+
+    result = client.import_recipe("one hot dog\nketchup\nbun")
+
+    # Name comes from the server when the caller doesn't supply one.
+    assert result["recipe_name"] == "Classic Hot Dog Bun"
+    assert result["food_id"] == 76533895
+    assert result["ingredient_count"] == 3
+    assert result["total_grams"] == 89.0  # 45 + 1 + 43
+    assert result["unmatched"] == []
+
+    started = state["calls"][0]
+    assert started == "/api/v2/import_recipe"
+    assert state["polls"] == 2
+
+    # One save, carrying the parser's food/measure/gram triples.
+    assert len(state["add_food"]) == 1
+    ingredients = state["add_food"][0]["data"]["ingredients"]
+    assert [(i["foodId"], i["measureId"], i["grams"]) for i in ingredients] == [
+        (4572, 12695, 45.0),
+        (449782, 992859, 1.0),
+        (456806, 1030841, 43.0),
+    ]
+
+    # Matches are reported back for review, alternates included.
+    assert result["ingredients"][0]["raw_text"] == "one hot dog"
+    assert result["ingredients"][0]["description"] == "hot dog"
+    assert result["ingredients"][0]["alternate_food_ids"] == [
+        4572,
+        449773,
+        459646,
+        461995,
+    ]
+
+
+def test_import_recipe_sends_expected_payloads(tmp_path, monkeypatch):
+    """Request bodies match the captured app traffic."""
+    client, _state = _import_client(
+        tmp_path, monkeypatch, [IMPORT_STARTED, IMPORT_COMPLETE]
+    )
+    sent = []
+    inner = client._http.post
+
+    def recording_post(endpoint, json=None):
+        sent.append((endpoint, json))
+        return inner(endpoint, json=json)
+
+    client._http.post = recording_post  # type: ignore[method-assign]
+
+    client.import_recipe("one hot dog\nketchup\nbun")
+
+    _, start_body = sent[0]
+    assert start_body["url"] == ""
+    assert start_body["ingredients"] == "one hot dog\nketchup\nbun"
+    assert start_body["enable_async"] is True
+
+    _, poll_body = sent[1]
+    assert poll_body["futureId"] == IMPORT_JOB_ID
+    assert poll_body["resultType"] == "recipe"
+
+
+def test_import_recipe_save_false_skips_persistence(tmp_path, monkeypatch):
+    """Parse-only mode returns matches without creating a food."""
+    client, state = _import_client(
+        tmp_path, monkeypatch, [IMPORT_STARTED, IMPORT_COMPLETE]
+    )
+
+    result = client.import_recipe("one hot dog\nketchup\nbun", save=False)
+
+    assert state["add_food"] == []
+    assert "food_id" not in result
+    assert len(result["ingredients"]) == 3
+
+
+def test_import_recipe_explicit_name_overrides_server_name(tmp_path, monkeypatch):
+    client, state = _import_client(
+        tmp_path, monkeypatch, [IMPORT_STARTED, IMPORT_COMPLETE]
+    )
+
+    result = client.import_recipe("one hot dog\nketchup\nbun", name="Ballpark Dog")
+
+    assert result["recipe_name"] == "Ballpark Dog"
+    assert state["add_food"][0]["data"]["name"] == "Ballpark Dog"
+
+
+def test_import_recipe_result_on_first_response_skips_polling(tmp_path, monkeypatch):
+    """A job that finishes immediately needs no poll round trip."""
+    immediate = IMPORT_STARTED | {
+        "progress": 100,
+        "result": IMPORT_COMPLETE["result"],
+    }
+    client, state = _import_client(tmp_path, monkeypatch, [immediate])
+
+    result = client.import_recipe("one hot dog")
+
+    assert state["polls"] == 0
+    assert result["food_id"] == 76533895
+
+
+def test_import_recipe_server_error_raises(tmp_path, monkeypatch):
+    """isError on the kickoff response fails loudly and saves nothing."""
+    failed = {
+        "isError": True,
+        "progress": 0,
+        "id": IMPORT_JOB_ID,
+        "message": "Could not parse those ingredients.",
+    }
+    client, state = _import_client(tmp_path, monkeypatch, [failed])
+
+    with pytest.raises(CronometerError, match="Could not parse those ingredients"):
+        client.import_recipe("asdfgh")
+
+    assert state["add_food"] == []
+
+
+def test_import_recipe_poll_error_raises(tmp_path, monkeypatch):
+    """isError surfacing mid-poll aborts the import."""
+    failed = {"isError": True, "id": IMPORT_JOB_ID, "message": "Import failed"}
+    client, state = _import_client(tmp_path, monkeypatch, [IMPORT_STARTED, failed])
+
+    with pytest.raises(CronometerError, match="Import failed"):
+        client.import_recipe("one hot dog")
+
+    assert state["add_food"] == []
+
+
+def test_import_recipe_times_out(tmp_path, monkeypatch):
+    """A job that never completes raises rather than polling forever."""
+    client, state = _import_client(
+        tmp_path, monkeypatch, [IMPORT_STARTED, IMPORT_IN_PROGRESS]
+    )
+
+    # Advance the clock a minute per reading so the deadline trips quickly.
+    ticks = iter(range(0, 10_000, 60))
+    monkeypatch.setattr(
+        "cronometer_api_mcp.client.time.monotonic", lambda: float(next(ticks))
+    )
+
+    with pytest.raises(CronometerError, match="did not finish within"):
+        client.import_recipe("one hot dog", timeout=30.0)
+
+    assert state["add_food"] == []
+
+
+def test_import_recipe_finished_without_result_raises(tmp_path, monkeypatch):
+    """100% progress with no payload is a server bug, not a silent success."""
+    empty = {"isError": False, "progress": 100, "id": IMPORT_JOB_ID, "messages": []}
+    client, state = _import_client(tmp_path, monkeypatch, [IMPORT_STARTED, empty])
+
+    with pytest.raises(CronometerError, match="without a result"):
+        client.import_recipe("one hot dog")
+
+    assert state["add_food"] == []
+
+
+def test_import_recipe_separates_unmatched_lines(tmp_path, monkeypatch):
+    """Unresolvable lines are reported, not fed to create_recipe."""
+    partial = {
+        "isError": False,
+        "progress": 100,
+        "id": IMPORT_JOB_ID,
+        "result": {
+            "recipe": {"name": "Partial Recipe"},
+            "entries": [
+                IMPORT_ENTRIES[0],
+                # No food matched.
+                _import_entry("a pinch of unobtainium", "unobtainium", 0, 0, 0, []),
+                # Matched a food but weighed nothing.
+                _import_entry("air", "air", 999, 111, 0, [999]),
+            ],
+        },
+    }
+    client, state = _import_client(tmp_path, monkeypatch, [IMPORT_STARTED, partial])
+
+    result = client.import_recipe("one hot dog\na pinch of unobtainium\nair")
+
+    assert [i["raw_text"] for i in result["ingredients"]] == ["one hot dog"]
+    assert [u["raw_text"] for u in result["unmatched"]] == [
+        "a pinch of unobtainium",
+        "air",
+    ]
+    # Only the usable line reaches the save.
+    saved = state["add_food"][0]["data"]["ingredients"]
+    assert [i["foodId"] for i in saved] == [4572]
+
+
+def test_import_recipe_all_unmatched_raises(tmp_path, monkeypatch):
+    """Nothing usable means no empty recipe gets created."""
+    nothing = {
+        "isError": False,
+        "progress": 100,
+        "id": IMPORT_JOB_ID,
+        "result": {
+            "recipe": {"name": "Empty"},
+            "entries": [_import_entry("unobtainium", "unobtainium", 0, 0, 0, [])],
+        },
+    }
+    client, state = _import_client(tmp_path, monkeypatch, [IMPORT_STARTED, nothing])
+
+    with pytest.raises(CronometerError, match="no usable ingredients"):
+        client.import_recipe("unobtainium")
+
+    assert state["add_food"] == []
+
+
+def test_import_recipe_rejects_blank_input(tmp_path, monkeypatch):
+    """Validation happens before any network call."""
+    client, state = _import_client(tmp_path, monkeypatch, [IMPORT_STARTED])
+
+    with pytest.raises(ValueError):
+        client.import_recipe("   \n  ")
+
+    assert state["calls"] == []
+
+
+# ---------------------------------------------------------------------------
 # create_custom_food: extra_nutrients
 # ---------------------------------------------------------------------------
 

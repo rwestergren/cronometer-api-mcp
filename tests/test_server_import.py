@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "get_food_log",
     "get_macro_targets",
     "get_nutrition_scores",
+    "import_recipe",
     "list_biometrics",
     "mark_day_complete",
     "remove_food_entry",

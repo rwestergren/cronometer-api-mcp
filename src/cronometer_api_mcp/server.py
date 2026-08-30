@@ -688,6 +688,61 @@ def add_recipe(
         return _err(e)
 
 
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+def import_recipe(ingredients: str, name: str | None = None) -> str:
+    """Create a recipe from a free-text ingredient list.
+
+    Cronometer's "Import Recipe" feature: pass ingredients as plain text, one
+    per line, and the server matches each to a food and converts the amount to
+    grams. No need to call search_foods first.
+
+    Prefer this when the user describes ingredients in their own words. Use
+    add_recipe instead when you have exact food_ids and gram weights -- e.g. the
+    user confirmed specific foods from search_foods results.
+
+    Matching is fuzzy, so report the returned matches back to the user for
+    confirmation. Unresolved lines are listed under "unmatched" and excluded
+    from the recipe. This saves to My Foods; use add_food_entry to log it.
+
+    Args:
+        ingredients: Ingredient lines separated by newlines, e.g.
+            "2 tbsp olive oil\\n200g chicken". Include quantities where known,
+            since bare names can match surprising amounts.
+        name: Recipe name. Defaults to a server-generated one.
+    """
+    try:
+        client = _get_client()
+        result = client.import_recipe(ingredients, name=name)
+
+        # Fetch back to get the server-assigned measure_id
+        food_data = client.get_food(result["food_id"])
+        return _ok(
+            {
+                "food_id": result["food_id"],
+                "measure_id": food_data.get("defaultMeasureId"),
+                "name": result["recipe_name"],
+                "total_grams": result["total_grams"],
+                "ingredient_count": result["ingredient_count"],
+                "ingredients": result["ingredients"],
+                "unmatched": result["unmatched"],
+                "note": (
+                    "Matching is automatic -- show the ingredients list to the "
+                    "user to confirm. Use food_id and measure_id with "
+                    "add_food_entry to log this recipe."
+                ),
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Macro targets
 # ------------------------------------------------------------------
