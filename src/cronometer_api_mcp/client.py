@@ -9,9 +9,13 @@ Frida-based traffic capture that established the auth flow and initial
 endpoints.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
+import struct
 import threading
 import time
 from datetime import date, datetime
@@ -118,6 +122,23 @@ _IMPORT_COMPLETE_PROGRESS = 100
 
 class CronometerError(Exception):
     """Raised when a Cronometer API call fails."""
+
+
+def _totp_code(secret: str, for_time: float | None = None) -> str:
+    """Current RFC 6238 TOTP code (SHA-1, 30 s period, 6 digits) for `secret`.
+
+    `secret` is the base32 key shown by Cronometer when enabling two-factor
+    authentication; authenticator apps display it grouped and sometimes
+    lowercased, so whitespace and case are normalized before decoding.
+    """
+    normalized = "".join(secret.split()).upper()
+    normalized += "=" * (-len(normalized) % 8)
+    key = base64.b32decode(normalized)
+    counter = int((time.time() if for_time is None else for_time) // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
+    return f"{code % 1_000_000:06d}"
 
 
 class CronometerClient:
@@ -251,6 +272,11 @@ class CronometerClient:
             )
         return username, password
 
+    @staticmethod
+    def _totp_user_code() -> str | None:
+        secret = os.getenv("CRONOMETER_TOTP_SECRET")
+        return _totp_code(secret) if secret else None
+
     def login(self) -> None:
         """Authenticate with Cronometer and cache the session token.
 
@@ -271,7 +297,9 @@ class CronometerClient:
             # leaves the account setting untouched and the response echoes the
             # account's real zone.
             "timezone": None,
-            "userCode": None,
+            # 6-digit TOTP code for accounts with two-factor authentication,
+            # derived from CRONOMETER_TOTP_SECRET; null when 2FA is not in use.
+            "userCode": self._totp_user_code(),
             "build": "4.48.2 b2807-a",
             "device": "Android 14 (SDK 34), Google Pixel 6 Pro",
             "firebaseToken": "",
@@ -295,6 +323,12 @@ class CronometerClient:
             data = resp.json()
 
             if data.get("result") != "SUCCESS" and "sessionKey" not in data:
+                if data.get("error") == "TOTP_CODE_REQUIRED":
+                    raise CronometerError(
+                        "Login failed: the account has two-factor authentication "
+                        "enabled; set CRONOMETER_TOTP_SECRET to the base32 key "
+                        "shown when 2FA was set up"
+                    )
                 raise CronometerError(f"Login failed: {data}")
 
             self._user_id = data["id"]
