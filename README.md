@@ -82,7 +82,9 @@ cached session, so it also overrides a stale cached timezone.
       "command": ["uvx", "cronometer-api-mcp"],
       "environment": {
         "CRONOMETER_USERNAME": "{env:CRONOMETER_USERNAME}",
-        "CRONOMETER_PASSWORD": "{env:CRONOMETER_PASSWORD}"
+        "CRONOMETER_PASSWORD": "{env:CRONOMETER_PASSWORD}",
+        "CRONOMETER_TOTP_SECRET": "{env:CRONOMETER_TOTP_SECRET}",
+        "CRONOMETER_ACCOUNT_TZ": "{env:CRONOMETER_ACCOUNT_TZ}"
       },
       "enabled": true
     }
@@ -100,7 +102,9 @@ cached session, so it also overrides a stale cached timezone.
       "args": ["cronometer-api-mcp"],
       "env": {
         "CRONOMETER_USERNAME": "your@email.com",
-        "CRONOMETER_PASSWORD": "your-password"
+        "CRONOMETER_PASSWORD": "your-password",
+        "CRONOMETER_TOTP_SECRET": "your-base32-key",
+        "CRONOMETER_ACCOUNT_TZ": "America/Los_Angeles"
       }
     }
   }
