@@ -39,6 +39,20 @@ export CRONOMETER_USERNAME="your@email.com"
 export CRONOMETER_PASSWORD="your-password"
 ```
 
+#### Optional: two-factor authentication
+
+If the account has two-factor authentication enabled, `/api/v2/login`
+answers `TOTP_CODE_REQUIRED` unless the request carries the current 6-digit
+code. Give the server the base32 key that Cronometer showed when 2FA was set
+up (the same key you scanned into your authenticator app) and it derives the
+code itself at every login (RFC 6238, SHA-1, 30 s period):
+
+```bash
+export CRONOMETER_TOTP_SECRET="ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567"
+```
+
+Spaces and lowercase are fine. Leave it unset for accounts without 2FA.
+
 #### Optional: override the account timezone
 
 Diary entries are stamped in your Cronometer account's timezone, which the
@@ -68,7 +82,9 @@ cached session, so it also overrides a stale cached timezone.
       "command": ["uvx", "cronometer-api-mcp"],
       "environment": {
         "CRONOMETER_USERNAME": "{env:CRONOMETER_USERNAME}",
-        "CRONOMETER_PASSWORD": "{env:CRONOMETER_PASSWORD}"
+        "CRONOMETER_PASSWORD": "{env:CRONOMETER_PASSWORD}",
+        "CRONOMETER_TOTP_SECRET": "{env:CRONOMETER_TOTP_SECRET}",
+        "CRONOMETER_ACCOUNT_TZ": "{env:CRONOMETER_ACCOUNT_TZ}"
       },
       "enabled": true
     }
@@ -86,7 +102,9 @@ cached session, so it also overrides a stale cached timezone.
       "args": ["cronometer-api-mcp"],
       "env": {
         "CRONOMETER_USERNAME": "your@email.com",
-        "CRONOMETER_PASSWORD": "your-password"
+        "CRONOMETER_PASSWORD": "your-password",
+        "CRONOMETER_TOTP_SECRET": "your-base32-key",
+        "CRONOMETER_ACCOUNT_TZ": "America/Los_Angeles"
       }
     }
   }

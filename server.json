@@ -27,6 +27,18 @@
           "description": "Your Cronometer account password",
           "isRequired": true,
           "isSecret": true
+        },
+        {
+          "name": "CRONOMETER_TOTP_SECRET",
+          "description": "Base32 key for accounts with two-factor authentication",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "CRONOMETER_ACCOUNT_TZ",
+          "description": "Optional IANA timezone override, for example America/Los_Angeles",
+          "isRequired": false,
+          "isSecret": false
         }
       ]
     }
