@@ -610,6 +610,112 @@ def add_custom_food(
         return _err(e)
 
 
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+def update_custom_food(
+    food_id: int,
+    name: str | None = None,
+    calories: float | None = None,
+    protein_g: float | None = None,
+    fat_g: float | None = None,
+    carbs_g: float | None = None,
+    fiber_g: float | None = None,
+    sugar_g: float | None = None,
+    sodium_mg: float | None = None,
+    saturated_fat_g: float | None = None,
+    extra_nutrients: dict[int, float] | None = None,
+    serving_name: str | None = None,
+    serving_grams: float | None = None,
+) -> str:
+    """Edit an existing custom food (one you created) in place.
+
+    Only the arguments you pass change; everything else keeps its current
+    value. Find the food_id with search_foods (source "Custom") or
+    get_food_details. Diary entries that already use the food pick up the
+    new values.
+
+    Nutrient amounts are per serving: the food's default serving, or
+    serving_grams when you pass it. To change the serving weight without
+    re-entering nutrition, pass serving_grams alone; the stored per-100g
+    values stay put, so the per-serving numbers scale with the new weight.
+
+    Args:
+        food_id: ID of the custom food to edit.
+        name: New food name.
+        calories: Calories per serving (kcal).
+        protein_g: Protein per serving (g).
+        fat_g: Fat per serving (g).
+        carbs_g: Carbs per serving (g).
+        fiber_g: Fiber per serving (g).
+        sugar_g: Sugar per serving (g).
+        sodium_mg: Sodium per serving (mg).
+        saturated_fat_g: Saturated fat per serving (g).
+        extra_nutrients: Additional nutrients keyed by Cronometer nutrient ID
+            (from get_daily_nutrition) and valued per serving; must not reuse
+            an ID the named args already cover.
+        serving_name: New name for the default serving.
+        serving_grams: New weight of the default serving in grams.
+    """
+    try:
+        client = _get_client()
+        result = client.update_custom_food(
+            food_id,
+            name=name,
+            calories=calories,
+            protein_g=protein_g,
+            fat_g=fat_g,
+            carbs_g=carbs_g,
+            fiber_g=fiber_g,
+            sugar_g=sugar_g,
+            sodium_mg=sodium_mg,
+            saturated_fat_g=saturated_fat_g,
+            extra_nutrients=extra_nutrients,
+            serving_name=serving_name,
+            serving_grams=serving_grams,
+        )
+        return _ok({"food_id": result["food_id"], "name": result["name"]})
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+def delete_custom_food(food_id: int) -> str:
+    """Delete a custom food (one you created) by retiring it.
+
+    The food disappears from search and from the Custom Foods list. Diary
+    entries that already use it are kept, and get_food_details can still read
+    it by ID. Database foods (USDA, NCCDB, CRDB, ...) cannot be deleted.
+
+    Args:
+        food_id: ID of the custom food to delete.
+    """
+    try:
+        client = _get_client()
+        result = client.retire_custom_food(food_id)
+        return _ok(
+            {
+                "food_id": result["food_id"],
+                "name": result["name"],
+                "retired": True,
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Recipe creation
 # ------------------------------------------------------------------
