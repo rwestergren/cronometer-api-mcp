@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cronometer_api_mcp.client import CronometerClient
+from cronometer_api_mcp.client import _FALLBACK_TIMEZONE, CronometerClient
 
 
 class FakeResp:
@@ -306,4 +306,179 @@ def test_pre_timezone_cache_is_rejected(tmp_path, monkeypatch):
 def test_unknown_timezone_falls_back(tmp_path):
     """An unresolvable zone name falls back rather than raising."""
     client = _client(tmp_path, "Not/AZone")
-    assert client._tzinfo() == ZoneInfo("America/New_York")
+    assert client._tzinfo() == ZoneInfo(_FALLBACK_TIMEZONE)
+
+
+# ---- cold start: the clock must not be read before the zone is known -------
+#
+# Regression: callers read the clock pre-auth, so the first entry in a fresh
+# container stamped in the fallback zone and later ones were correct -- which
+# read as intermittent drift.
+
+
+def _cold_client(
+    tmp_path: Path, response_tz: str | None
+) -> tuple[CronometerClient, dict]:
+    """An unauthenticated client plus a captured-payload dict.
+
+    Stubs login and add_serving on one fake. Nothing pre-seeds ``_timezone`` --
+    that is the condition under test.
+    """
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    captured: dict = {"logins": 0}
+
+    def fake_post(endpoint, json=None):
+        if endpoint == "/api/v2/login":
+            captured["logins"] += 1
+            body = {"result": "SUCCESS", "id": 123, "sessionKey": "TOKEN"}
+            if response_tz is not None:
+                body["timezone"] = response_tz
+            return FakeResp(body)
+        captured["endpoint"] = endpoint
+        captured["payload"] = json
+        return FakeResp({"result": "SUCCESS", "id": 999})
+
+    client._http.post = fake_post  # type: ignore[method-assign]
+    return client, captured
+
+
+def test_first_add_serving_in_a_cold_client_stamps_in_account_zone(
+    tmp_path, frozen_utc, monkeypatch
+):
+    """The prod regression: 18:01 UTC is 11:01 PDT, not 14:01 Eastern."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client, captured = _cold_client(tmp_path, "America/Los_Angeles")
+
+    assert client._timezone is None  # nothing resolved yet
+    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+
+    serving = captured["payload"]["serving"]
+    assert serving["time"] == "11:1:30"
+    assert serving["day"] == "2026-7-27"
+    # Lunch; Eastern would have made it Dinner.
+    assert serving["order"] == (2 << 16) | 1
+
+
+def test_cold_client_day_bucketing_uses_account_zone(tmp_path, monkeypatch):
+    """A late-evening PDT entry must not slip a day, as a fallback zone would."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+
+    class LateEvening(_dt.datetime):
+        # 05:30 UTC on the 28th == 22:30 PDT on the 27th.
+        _fixed_utc = _dt.datetime(2026, 7, 28, 5, 30, 0, tzinfo=_dt.UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls._fixed_utc.replace(tzinfo=None)
+            return cls._fixed_utc.astimezone(tz)
+
+    monkeypatch.setattr("cronometer_api_mcp.client.datetime", LateEvening)
+    client, captured = _cold_client(tmp_path, "America/Los_Angeles")
+
+    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+
+    assert captured["payload"]["serving"]["day"] == "2026-7-27"
+
+
+def test_env_override_needs_no_login_to_stamp(tmp_path, frozen_utc, monkeypatch):
+    """An injected zone leaves nothing to learn, so no login -- which is what
+    makes a cold container correct on its first entry."""
+    monkeypatch.setenv("CRONOMETER_ACCOUNT_TZ", "America/Los_Angeles")
+    client, captured = _cold_client(tmp_path, "America/New_York")
+
+    assert client._tzinfo() == ZoneInfo("America/Los_Angeles")
+    assert captured["logins"] == 0
+
+
+def test_tzinfo_authenticates_when_zone_is_unknown(tmp_path, frozen_utc, monkeypatch):
+    """Without an override the login response is the only source."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client, captured = _cold_client(tmp_path, "America/Los_Angeles")
+
+    assert client._tzinfo() == ZoneInfo("America/Los_Angeles")
+    assert captured["logins"] == 1
+
+
+def test_cold_today_uses_account_zone(tmp_path, frozen_utc, monkeypatch):
+    """today() defaults a date for many tools, so it must resolve too."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client, _ = _cold_client(tmp_path, "America/Los_Angeles")
+
+    assert client.today() == _dt.date(2026, 7, 27)
+
+
+# ---- fallback must not look plausible -------------------------------------
+
+
+def test_missing_response_zone_falls_back_to_utc(tmp_path, frozen_utc, monkeypatch):
+    """No reported zone -> UTC. Eastern was a silent 3h lie for a PDT user."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client, _ = _cold_client(tmp_path, None)
+
+    assert client._tzinfo() == ZoneInfo("UTC")
+
+
+def test_unresolvable_response_zone_is_rejected_at_the_boundary(
+    tmp_path, frozen_utc, monkeypatch
+):
+    """Rejected where it's still attributable to Cronometer."""
+    monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
+    monkeypatch.setenv("CRONOMETER_PASSWORD", "pw")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    client, _ = _cold_client(tmp_path, "Mars/Olympus_Mons")
+
+    client.login()
+    assert client._timezone is None
+    assert client._tzinfo() == ZoneInfo("UTC")
+
+
+def test_unknown_stored_zone_falls_back_to_utc(tmp_path):
+    """A zone this tzdata build can't construct is our problem, not theirs."""
+    client = _client(tmp_path, "Not/AZone")
+    assert client._tzinfo() == ZoneInfo("UTC")
+
+
+# ---- session cache must not thrash logins for zoneless accounts ------------
+
+
+def test_cache_with_null_timezone_is_reused(tmp_path, monkeypatch):
+    """None is now a legitimate resolved value, persisted as null. Treating it
+    like the legacy schema would re-login on every container start."""
+    import json
+
+    monkeypatch.setenv("CRONOMETER_USERNAME", "")
+    monkeypatch.delenv("CRONOMETER_ACCOUNT_TZ", raising=False)
+    (tmp_path / "session.json").write_text(
+        json.dumps({"username": "", "user_id": 123, "token": "TOKEN", "timezone": None})
+    )
+
+    client = CronometerClient(session_path=tmp_path / "session.json")
+
+    assert client._token == "TOKEN"
+    assert client._timezone is None
+    assert client._tzinfo() == ZoneInfo(_FALLBACK_TIMEZONE)
+
+
+def test_cache_predating_timezone_support_is_still_rejected(tmp_path, monkeypatch):
+    """No timezone key is the legacy schema: re-login to learn the zone."""
+    import json
+
+    monkeypatch.setenv("CRONOMETER_USERNAME", "")
+    (tmp_path / "session.json").write_text(
+        json.dumps({"username": "", "user_id": 123, "token": "TOKEN"})
+    )
+
+    client = CronometerClient(session_path=tmp_path / "session.json")
+
+    assert client._token is None

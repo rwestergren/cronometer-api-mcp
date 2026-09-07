@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://mobile.cronometer.com"
 
-# Fallback timezone used only if the account's timezone can't be resolved from
-# the login response. Matches the value historically assumed by this client.
-_DEFAULT_TIMEZONE = "America/New_York"
+# Only when the zone can't be resolved at all. UTC, not a plausible zone to
+# make fallback more obvious
+_FALLBACK_TIMEZONE = "UTC"
 
 # Optional deploy-time override for the account timezone. When set to a valid
 # IANA zone name it is authoritative over both the login response and any
@@ -206,10 +206,13 @@ class CronometerClient:
             return
         token = data.get("token")
         user_id = data.get("user_id")
-        timezone = data.get("timezone")
-        # Reject caches that lack a stored timezone (pre-timezone schema) so we
-        # re-login once and pick up the account zone rather than guessing.
-        if not isinstance(timezone, str):
+        # Missing key is the pre-timezone schema: re-login to learn the zone.
+        # Explicit null means the account has none, so honour the cache instead
+        # of re-logging in every start against a rate-limited endpoint.
+        if "timezone" not in data:
+            return
+        timezone = data["timezone"]
+        if timezone is not None and not isinstance(timezone, str):
             return
         if isinstance(token, str) and isinstance(user_id, int):
             self._user_id = user_id
@@ -497,38 +500,52 @@ class CronometerClient:
             return None
         return name
 
-    def _resolve_timezone(self, response_tz: str | None) -> str:
-        """Resolve the account timezone by priority.
+    def _resolve_timezone(self, response_tz: str | None) -> str | None:
+        """Env override, else the login response. None when neither is usable.
 
-        1. CRONOMETER_ACCOUNT_TZ env override (authoritative escape hatch).
-        2. The value from the login response (trustworthy now that login()
-           no longer overwrites the account's server-side zone; see #29).
-        3. The historical default.
+        Validates the response: storing an unknown name defers the failure to
+        ``_tzinfo``, where it is no longer attributable to Cronometer.
         """
         env = self._env_timezone()
         if env:
             return env
         if isinstance(response_tz, str) and response_tz:
-            return response_tz
-        return _DEFAULT_TIMEZONE
+            try:
+                ZoneInfo(response_tz)
+                return response_tz
+            except ZoneInfoNotFoundError, ValueError:
+                logger.warning(
+                    "Cronometer reported unknown timezone %r; ignoring", response_tz
+                )
+        return None
 
     def _tzinfo(self) -> ZoneInfo:
-        """Return the account's timezone, falling back to the default.
+        """The account's zone, logging in if that's the only way to learn it.
 
-        Resolved from the login response (or restored session cache). If the
-        stored name is unset or unknown (e.g. a zone missing from the system
-        tzdata), log once and fall back so stamping never hard-fails.
+        Every consumer funnels through here, so this is where the zone has to
+        be guaranteed resolved: callers used to read the clock pre-auth and get
+        the fallback, correcting only once something else triggered login.
+
+        Env override first, so an injected zone needs no network.
         """
-        name = self._timezone or _DEFAULT_TIMEZONE
+        name = self._env_timezone()
+        if not name:
+            self._ensure_auth()
+            name = self._timezone
+        if not name:
+            logger.warning(
+                "No account timezone available; stamping in %s", _FALLBACK_TIMEZONE
+            )
+            return ZoneInfo(_FALLBACK_TIMEZONE)
         try:
             return ZoneInfo(name)
         except ZoneInfoNotFoundError, ValueError:
             logger.warning(
-                "Unknown account timezone %r; falling back to %s",
+                "Unknown account timezone %r; stamping in %s",
                 name,
-                _DEFAULT_TIMEZONE,
+                _FALLBACK_TIMEZONE,
             )
-            return ZoneInfo(_DEFAULT_TIMEZONE)
+            return ZoneInfo(_FALLBACK_TIMEZONE)
 
     def now(self) -> datetime:
         """Current wall-clock time in the account's timezone (aware)."""
