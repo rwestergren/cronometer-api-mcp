@@ -149,8 +149,9 @@ class CronometerClient:
     Re-authenticates automatically when the session expires.
 
     Thread safety: one instance is shared across MCP tool calls, which the SDK
-    dispatches on worker threads. Only auth state transitions are serialized;
-    requests still run concurrently. See `_auth_lock`.
+    dispatches on worker threads. Auth state transitions are serialized (see
+    `_auth_lock`), and edits to a given custom food are serialized per food id
+    (see `_food_lock`); everything else runs concurrently.
     """
 
     def __init__(self, *, session_path: Path | None = None) -> None:
@@ -164,6 +165,13 @@ class CronometerClient:
         # Guards (_user_id, _token, _timezone) and the session file mirroring
         # them. Reentrant because the auth paths nest: login -> _save_cached_session.
         self._auth_lock = threading.RLock()
+        # One lock per custom food id, created on first use, so that the
+        # fetch-modify-save cycle of update/retire can't interleave with
+        # another edit of the same food (add_food replaces the whole object,
+        # so interleaved edits would clobber each other or un-retire a food).
+        # `_food_locks_guard` protects the dict itself.
+        self._food_locks: dict[int, threading.Lock] = {}
+        self._food_locks_guard = threading.Lock()
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
         self._nutrient_defs: dict[int, dict] | None = None
@@ -744,18 +752,36 @@ class CronometerClient:
             raise CronometerError(f"Failed to save custom food {data['id']}: {resp}")
         return resp
 
+    def _food_lock(self, food_id: int) -> threading.Lock:
+        """The lock serializing edits of one custom food; see __init__."""
+        with self._food_locks_guard:
+            lock = self._food_locks.get(food_id)
+            if lock is None:
+                lock = self._food_locks[food_id] = threading.Lock()
+            return lock
+
     def _get_custom_food(self, food_id: int) -> dict:
-        """Fetch a food and refuse anything the user didn't create.
+        """Fetch a food and refuse anything that isn't a plain custom food.
 
         Re-sending a database food through add_food is untested territory (it
         might create a private copy or fail), so only source "Custom" -- what
         get_food reports for user-created foods -- may be edited or retired.
+
+        User-created recipes report source "Custom" too, but they carry an
+        `ingredients` array their nutrient totals are derived from, and their
+        measures follow different rules. Editing one as a plain food would
+        leave it inconsistent, so recipes are refused as well.
         """
         food = self.get_food(food_id)
         if food.get("source") != "Custom":
             raise CronometerError(
                 f"Food {food_id} ({food.get('name')!r}) is not a custom food "
                 f"(source={food.get('source')!r}); only custom foods can be edited"
+            )
+        if food.get("ingredients"):
+            raise CronometerError(
+                f"Food {food_id} ({food.get('name')!r}) is a recipe; only plain "
+                f"custom foods can be edited or deleted"
             )
         return food
 
@@ -804,66 +830,69 @@ class CronometerClient:
                     f"those instead."
                 )
 
-        food = self._get_custom_food(food_id)
+        with self._food_lock(food_id):
+            food = self._get_custom_food(food_id)
 
-        if name is not None:
-            old_name = food.get("name")
-            food["name"] = name
-            for t in food.get("translations", []):
-                if t.get("name") == old_name:
-                    t["name"] = name
+            if name is not None:
+                old_name = food.get("name")
+                food["name"] = name
+                for t in food.get("translations", []):
+                    if t.get("name") == old_name:
+                        t["name"] = name
 
-        measure = self._default_measure(food)
-        if measure is not None:
-            if serving_name is not None:
-                measure["name"] = serving_name
-            if serving_grams is not None:
-                measure["value"] = serving_grams
-        grams = (measure or {}).get("value") or 100.0
-        scale = 100.0 / grams if grams > 0 else 1.0
+            measure = self._default_measure(food)
+            if measure is not None:
+                if serving_name is not None:
+                    measure["name"] = serving_name
+                if serving_grams is not None:
+                    measure["value"] = serving_grams
+            grams = (measure or {}).get("value") or 100.0
+            scale = 100.0 / grams if grams > 0 else 1.0
 
-        per_serving = {
-            NUTRIENT_IDS["energy"]: calories,
-            NUTRIENT_IDS["protein"]: protein_g,
-            NUTRIENT_IDS["fat"]: fat_g,
-            NUTRIENT_IDS["carbs"]: carbs_g,
-            NUTRIENT_IDS["fiber"]: fiber_g,
-            NUTRIENT_IDS["sugar"]: sugar_g,
-            NUTRIENT_IDS["sodium"]: sodium_mg,
-            NUTRIENT_IDS["saturated_fat"]: saturated_fat_g,
-        }
-        updates = {
-            nid: round(v * scale, 2) for nid, v in per_serving.items() if v is not None
-        }
-        for nid, v in (extra_nutrients or {}).items():
-            updates[nid] = round(v * scale, 2)
+            per_serving = {
+                NUTRIENT_IDS["energy"]: calories,
+                NUTRIENT_IDS["protein"]: protein_g,
+                NUTRIENT_IDS["fat"]: fat_g,
+                NUTRIENT_IDS["carbs"]: carbs_g,
+                NUTRIENT_IDS["fiber"]: fiber_g,
+                NUTRIENT_IDS["sugar"]: sugar_g,
+                NUTRIENT_IDS["sodium"]: sodium_mg,
+                NUTRIENT_IDS["saturated_fat"]: saturated_fat_g,
+            }
+            updates = {
+                nid: round(v * scale, 2)
+                for nid, v in per_serving.items()
+                if v is not None
+            }
+            for nid, v in (extra_nutrients or {}).items():
+                updates[nid] = round(v * scale, 2)
 
-        nutrients = food.setdefault("nutrients", [])
-        by_id = {n["id"]: n for n in nutrients}
+            nutrients = food.setdefault("nutrients", [])
+            by_id = {n["id"]: n for n in nutrients}
 
-        def set_amount(nid: int, amount: float) -> None:
-            entry = by_id.get(nid)
-            if entry is None:
-                entry = {"id": nid, "amount": amount}
-                nutrients.append(entry)
-                by_id[nid] = entry
-            else:
-                entry["amount"] = amount
+            def set_amount(nid: int, amount: float) -> None:
+                entry = by_id.get(nid)
+                if entry is None:
+                    entry = {"id": nid, "amount": amount}
+                    nutrients.append(entry)
+                    by_id[nid] = entry
+                else:
+                    entry["amount"] = amount
 
-        for nid, amount in updates.items():
-            set_amount(nid, amount)
+            for nid, amount in updates.items():
+                set_amount(nid, amount)
 
-        # Derived duplicates the app stores alongside the macros (see
-        # create_custom_food): mirrored protein/fat/carbs and net carbs.
-        for src, mirror in ((203, -203), (204, -204), (205, -205)):
-            if src in updates:
-                set_amount(mirror, updates[src])
-        if NUTRIENT_IDS["carbs"] in updates or NUTRIENT_IDS["fiber"] in updates:
-            carbs = by_id.get(NUTRIENT_IDS["carbs"], {}).get("amount", 0)
-            fiber = by_id.get(NUTRIENT_IDS["fiber"], {}).get("amount", 0)
-            set_amount(NUTRIENT_IDS["net_carbs"], round(max(0, carbs - fiber), 2))
+            # Derived duplicates the app stores alongside the macros (see
+            # create_custom_food): mirrored protein/fat/carbs and net carbs.
+            for src, mirror in ((203, -203), (204, -204), (205, -205)):
+                if src in updates:
+                    set_amount(mirror, updates[src])
+            if NUTRIENT_IDS["carbs"] in updates or NUTRIENT_IDS["fiber"] in updates:
+                carbs = by_id.get(NUTRIENT_IDS["carbs"], {}).get("amount", 0)
+                fiber = by_id.get(NUTRIENT_IDS["fiber"], {}).get("amount", 0)
+                set_amount(NUTRIENT_IDS["net_carbs"], round(max(0, carbs - fiber), 2))
 
-        self._save_custom_food(food)
+            self._save_custom_food(food)
         logger.info("Updated custom food %r (id=%d)", food["name"], food_id)
         return {"food_id": food_id, "name": food["name"]}
 
@@ -878,9 +907,10 @@ class CronometerClient:
 
         Returns {"food_id": int, "name": str, "retired": True}.
         """
-        food = self._get_custom_food(food_id)
-        food["retired"] = True
-        self._save_custom_food(food)
+        with self._food_lock(food_id):
+            food = self._get_custom_food(food_id)
+            food["retired"] = True
+            self._save_custom_food(food)
         logger.info("Retired custom food %r (id=%d)", food.get("name"), food_id)
         return {"food_id": food_id, "name": food.get("name"), "retired": True}
 

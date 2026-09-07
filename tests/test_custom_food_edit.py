@@ -8,6 +8,8 @@ haven't found; retiring is the closest the known API offers).
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from test_client import make_cold_client
 
@@ -74,6 +76,18 @@ def custom_food(**overrides) -> dict:
     }
     food.update(overrides)
     return food
+
+
+def recipe(**overrides) -> dict:
+    """A user-created recipe: same shape as a custom food (get_food reports
+    source "Custom" for both) plus an `ingredients` array."""
+    return custom_food(
+        name="Test Recipe",
+        ingredients=[
+            {"id": 1, "foodId": 12345, "grams": 100, "measureId": 0, "amount": 1}
+        ],
+        **overrides,
+    )
 
 
 def nutrients_by_id(payload: dict) -> dict[int, float]:
@@ -184,6 +198,18 @@ def test_update_custom_food_refuses_database_foods(tmp_path):
     assert len(state["payloads"]) == 1  # only the get_food
 
 
+def test_update_custom_food_refuses_recipes(tmp_path):
+    """A recipe also reports source "Custom", but its nutrients are derived
+    from its ingredients and its measures mean something else, so editing it
+    as a plain food would corrupt it. Reject before anything is sent."""
+    client, state = make_cold_client(tmp_path, [recipe(), OK])
+
+    with pytest.raises(CronometerError, match="recipe"):
+        client.update_custom_food(FOOD_ID, calories=100)
+
+    assert len(state["payloads"]) == 1  # only the get_food
+
+
 def test_update_custom_food_raises_when_server_returns_other_id(tmp_path):
     """add_food answering with a different id means it created a copy instead
     of editing in place; surface that rather than report success."""
@@ -220,3 +246,95 @@ def test_retire_custom_food_refuses_database_foods(tmp_path):
         client.retire_custom_food(FOOD_ID)
 
     assert len(state["payloads"]) == 1
+
+
+def test_retire_custom_food_refuses_recipes(tmp_path):
+    client, state = make_cold_client(tmp_path, [recipe(), OK])
+
+    with pytest.raises(CronometerError, match="recipe"):
+        client.retire_custom_food(FOOD_ID)
+
+    assert len(state["payloads"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-food locking
+# ---------------------------------------------------------------------------
+
+
+def test_edit_holds_the_food_lock_from_fetch_through_save(tmp_path):
+    """Both the get_food and the add_food of an update or retire happen with
+    the food's lock held, and it is released afterwards."""
+    client, _ = make_cold_client(tmp_path, [custom_food(), OK, custom_food(), OK])
+    lock = client._food_lock(FOOD_ID)
+    seen: list[tuple[str, bool]] = []
+    real_post = client._http.post
+
+    def spying_post(endpoint, json=None):
+        seen.append((endpoint, lock.locked()))
+        return real_post(endpoint, json=json)
+
+    client._http.post = spying_post  # type: ignore[method-assign]
+
+    client.update_custom_food(FOOD_ID, name="Renamed")
+    client.retire_custom_food(FOOD_ID)
+
+    assert seen == [
+        ("/api/v2/get_food", True),
+        ("/api/v2/add_food", True),
+        ("/api/v2/get_food", True),
+        ("/api/v2/add_food", True),
+    ]
+    assert not lock.locked()
+    assert client._food_lock(FOOD_ID) is lock  # one lock per food id
+
+
+def test_concurrent_edits_of_one_food_are_serialized(tmp_path):
+    """add_food replaces the whole object, so two interleaved
+    fetch-modify-save cycles would clobber each other (or resurrect a food
+    the other just retired). The second caller must not fetch until the first
+    has saved."""
+    client, state = make_cold_client(tmp_path, [custom_food(), OK, custom_food(), OK])
+    first_fetched = threading.Event()
+    release_first = threading.Event()
+    calls: list[tuple[str, str]] = []
+    real_post = client._http.post
+
+    def stalling_post(endpoint, json=None):
+        me = threading.current_thread().name
+        calls.append((me, endpoint))
+        if me == "first" and endpoint == "/api/v2/get_food":
+            first_fetched.set()
+            release_first.wait(timeout=5)
+        return real_post(endpoint, json=json)
+
+    client._http.post = stalling_post  # type: ignore[method-assign]
+
+    first = threading.Thread(
+        target=client.update_custom_food,
+        args=(FOOD_ID,),
+        kwargs={"name": "A"},
+        name="first",
+    )
+    second = threading.Thread(
+        target=client.retire_custom_food, args=(FOOD_ID,), name="second"
+    )
+    first.start()
+    assert first_fetched.wait(timeout=5)
+    second.start()
+    second.join(timeout=0.2)
+    assert second.is_alive()  # blocked on the lock, has not fetched
+    assert calls == [("first", "/api/v2/get_food")]
+
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert calls == [
+        ("first", "/api/v2/get_food"),
+        ("first", "/api/v2/add_food"),
+        ("second", "/api/v2/get_food"),
+        ("second", "/api/v2/add_food"),
+    ]
+    assert state["payloads"][1]["data"]["name"] == "A"
+    assert state["payloads"][3]["data"]["retired"] is True

@@ -638,7 +638,8 @@ def update_custom_food(
     Only the arguments you pass change; everything else keeps its current
     value. Find the food_id with search_foods (source "Custom") or
     get_food_details. Diary entries that already use the food pick up the
-    new values.
+    new values. Recipes cannot be edited with this tool, even though they
+    also show as source "Custom".
 
     Nutrient amounts are per serving: the food's default serving, or
     serving_grams when you pass it. To change the serving weight without
@@ -697,7 +698,8 @@ def delete_custom_food(food_id: int) -> str:
 
     The food disappears from search and from the Custom Foods list. Diary
     entries that already use it are kept, and get_food_details can still read
-    it by ID. Database foods (USDA, NCCDB, CRDB, ...) cannot be deleted.
+    it by ID. Database foods (USDA, NCCDB, CRDB, ...) and recipes cannot be
+    deleted with this tool.
 
     Args:
         food_id: ID of the custom food to delete.
