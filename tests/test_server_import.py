@@ -16,6 +16,7 @@ EXPECTED_TOOLS = {
     "add_food_entry",
     "add_recipe",
     "copy_day",
+    "delete_custom_food",
     "get_biometrics",
     "get_daily_nutrition",
     "get_fasting_history",
@@ -29,6 +30,7 @@ EXPECTED_TOOLS = {
     "mark_day_complete",
     "remove_food_entry",
     "search_foods",
+    "update_custom_food",
 }
 
 
@@ -93,6 +95,7 @@ def test_tool_annotations_survive_schema_coercion():
 
     assert tools["get_food_log"].annotations.read_only_hint is True
     assert tools["add_food_entry"].annotations.read_only_hint is False
+    assert tools["delete_custom_food"].annotations.destructive_hint is True
 
 
 def test_no_client_constructed_at_import():
