@@ -165,13 +165,12 @@ class CronometerClient:
         # Guards (_user_id, _token, _timezone) and the session file mirroring
         # them. Reentrant because the auth paths nest: login -> _save_cached_session.
         self._auth_lock = threading.RLock()
-        # One lock per custom food id, created on first use, so that the
-        # fetch-modify-save cycle of update/retire can't interleave with
-        # another edit of the same food (add_food replaces the whole object,
-        # so interleaved edits would clobber each other or un-retire a food).
-        # `_food_locks_guard` protects the dict itself.
+
+        # Serialize each food's fetch-modify-save cycle because add_food replaces the
+        # entire object. `_food_locks_guard` protects the lock registry.
         self._food_locks: dict[int, threading.Lock] = {}
         self._food_locks_guard = threading.Lock()
+
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
         self._nutrient_defs: dict[int, dict] | None = None
