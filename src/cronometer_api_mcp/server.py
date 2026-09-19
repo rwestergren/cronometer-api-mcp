@@ -8,11 +8,37 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from .client import CronometerClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+_WRITE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+_WRITE_IDEMPOTENT = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+_DESTRUCTIVE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 
 
 def _server_version() -> str:
@@ -98,14 +124,7 @@ def _err(e: Exception) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_food_log(date: str | None = None) -> str:
     """Get all diary entries for a given date.
 
@@ -177,14 +196,7 @@ def get_food_log(date: str | None = None) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE)
 def add_food_entry(
     food_id: int,
     measure_id: int,
@@ -245,14 +257,7 @@ def add_food_entry(
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_DESTRUCTIVE)
 def remove_food_entry(
     entry_ids: list[str],
     date: str | None = None,
@@ -285,14 +290,7 @@ def remove_food_entry(
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
 def mark_day_complete(date: str, complete: bool = True) -> str:
     """Mark a diary day as complete or incomplete.
 
@@ -316,14 +314,7 @@ def mark_day_complete(date: str, complete: bool = True) -> str:
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE)
 def copy_day(date: str | None = None) -> str:
     """Copy all diary entries from the previous day to the given date.
 
@@ -351,14 +342,7 @@ def copy_day(date: str | None = None) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_daily_nutrition(date: str | None = None) -> str:
     """Get daily nutrition summary with consumed macro and micronutrient totals.
 
@@ -392,14 +376,7 @@ def get_daily_nutrition(date: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_nutrition_scores(date: str | None = None) -> str:
     """Get nutrition scores with per-nutrient consumed amounts and category grades.
 
@@ -433,14 +410,7 @@ def get_nutrition_scores(date: str | None = None) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def search_foods(query: str) -> str:
     """Search Cronometer's food database by name.
 
@@ -481,14 +451,7 @@ def search_foods(query: str) -> str:
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_food_details(food_id: int) -> str:
     """Get detailed food information including nutrition and serving sizes.
 
@@ -531,14 +494,7 @@ def get_food_details(food_id: int) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE)
 def add_custom_food(
     name: str,
     calories: float,
@@ -610,14 +566,7 @@ def add_custom_food(
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_DESTRUCTIVE)
 def update_custom_food(
     food_id: int,
     name: str | None = None,
@@ -685,14 +634,7 @@ def update_custom_food(
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_DESTRUCTIVE)
 def delete_custom_food(food_id: int) -> str:
     """Delete a custom food (one you created) by retiring it.
 
@@ -723,14 +665,7 @@ def delete_custom_food(food_id: int) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE)
 def add_recipe(
     name: str,
     ingredients: list[dict],
@@ -796,14 +731,7 @@ def add_recipe(
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_WRITE)
 def import_recipe(ingredients: str, name: str | None = None) -> str:
     """Create a recipe from a free-text ingredient list.
 
@@ -856,14 +784,7 @@ def import_recipe(ingredients: str, name: str | None = None) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_macro_targets() -> str:
     """Get current macro targets including weekly schedule and templates.
 
@@ -889,14 +810,7 @@ def get_macro_targets() -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_fasting_history(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -927,14 +841,7 @@ def get_fasting_history(
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_fasting_stats() -> str:
     """Get aggregate fasting statistics.
 
@@ -954,14 +861,7 @@ def get_fasting_stats() -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def list_biometrics() -> str:
     """List the biometric metrics tracked in Cronometer.
 
@@ -993,14 +893,7 @@ def list_biometrics() -> str:
         return _err(e)
 
 
-@mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
+@mcp.tool(annotations=_READ_ONLY)
 def get_biometrics(
     metric_id: int,
     unit_id: int,

@@ -82,13 +82,8 @@ def test_registered_tools():
         assert tool.description, f"{tool.name} has no description"
 
 
-def test_tool_annotations_survive_schema_coercion():
-    """The read-only hints must reach the wire model.
-
-    They are declared in camelCase (`readOnlyHint`), which SDK 2.x accepts only
-    as an input alias for the snake_case attributes. A silent coercion failure
-    would strip the hints clients use to decide what is safe to call.
-    """
+def test_tool_annotations_reach_wire_model():
+    """The read-only hints must reach the wire model."""
     from cronometer_api_mcp.server import mcp
 
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
