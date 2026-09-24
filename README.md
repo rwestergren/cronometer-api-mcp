@@ -167,9 +167,9 @@ back from the inclusive end `date`:
 ```python
 get_food_log(date="yesterday")
 get_nutrition_scores(date="3 days ago")
-get_daily_nutrition(days=3)                    # Last 3 days, including today
+get_daily_nutrition(days=3)  # Last 3 days, including today
 get_daily_nutrition(date="yesterday", days=3)  # Previous 3 complete calendar days
-get_food_log(days=7)                          # Recent meals, including today
+get_food_log(days=7)  # Recent meals, including today
 ```
 
 For “my calories the last few days,” use `get_daily_nutrition(days=3)`.
