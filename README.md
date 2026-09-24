@@ -154,6 +154,29 @@ cached session, so it also overrides a stale cached timezone.
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
+### Relative dates and recent days
+
+`get_food_log`, `get_daily_nutrition`, and `get_nutrition_scores` also accept
+`"today"`, `"yesterday"`, and `"N days ago"` as their `date`. These are resolved
+at call time using your Cronometer account timezone, so Claude can pass relative
+inputs without relying on dates from earlier in a long conversation.
+
+`get_food_log` and `get_daily_nutrition` accept `days` (1–31, default 1), counting
+back from the inclusive end `date`:
+
+```python
+get_food_log(date="yesterday")
+get_nutrition_scores(date="3 days ago")
+get_daily_nutrition(days=3)                    # Last 3 days, including today
+get_daily_nutrition(date="yesterday", days=3)  # Previous 3 complete calendar days
+get_food_log(days=7)                          # Recent meals, including today
+```
+
+For “my calories the last few days,” use `get_daily_nutrition(days=3)`.
+Single-day responses retain their existing shape. Multi-day responses contain
+`start_date`, `end_date`, and a `days` list of daily results, oldest first.
+Returned dates are always concrete `YYYY-MM-DD` values.
+
 ## Transport
 
 stdio only. For remote/hosted use, the stdio server is wrapped by

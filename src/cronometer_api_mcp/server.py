@@ -2,13 +2,16 @@
 
 import json
 import logging
+import re
 import threading
 from datetime import date, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
+from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from .client import CronometerClient
 
@@ -62,7 +65,12 @@ mcp = MCPServer(
         "macro targets, biometrics, and fasting history from Cronometer. "
         "Use search_foods to find foods, get_food_details for nutrition info "
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
-        "review what was eaten."
+        "review what was eaten. For relative-date questions, prefer relative inputs "
+        "(today, yesterday, N days ago) in get_food_log, get_daily_nutrition, and "
+        "get_nutrition_scores instead of calculating dates from conversation history. "
+        "Use get_daily_nutrition(days=N) for calories or nutrients over the "
+        "last N calendar days, including today; set date='yesterday' for complete "
+        "days only. Relative dates are resolved at call time in the account timezone."
     ),
     version=_server_version(),
 )
@@ -88,6 +96,37 @@ def _parse_date(d: str | None) -> date | None:
     if d is None:
         return None
     return date.fromisoformat(d)
+
+
+def _resolve_read_days(d: str | None, days: int = 1) -> list[date]:
+    if type(days) is not int or not 1 <= days <= 31:
+        raise ValueError("days must be an integer between 1 and 31.")
+    value = d.strip().lower() if d is not None else "today"
+    relative = re.fullmatch(r"([0-9]+) days? ago", value)
+    try:
+        if value in ("today", "yesterday") or relative:
+            offset = int(relative[1]) if relative else int(value == "yesterday")
+            end = date_module_today() - timedelta(days=offset)
+        else:
+            end = date.fromisoformat(value)
+        return [end - timedelta(days=i) for i in range(days - 1, -1, -1)]
+    except (ValueError, OverflowError) as e:
+        raise ValueError(
+            "Use a valid YYYY-MM-DD date, 'today', 'yesterday', or 'N days ago'; "
+            "the entire range must fit within years 1–9999."
+        ) from e
+
+
+def _read_days_response(results: list[dict]) -> str:
+    if len(results) == 1:
+        return _ok(results[0])
+    return _ok(
+        {
+            "start_date": results[0]["date"],
+            "end_date": results[-1]["date"],
+            "days": results,
+        }
+    )
 
 
 def _ok(data: dict) -> str:
@@ -125,8 +164,15 @@ def _err(e: Exception) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-def get_food_log(date: str | None = None) -> str:
-    """Get all diary entries for a given date.
+def get_food_log(
+    date: str | None = None,
+    days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
+) -> str:
+    """Get diary entries for one day or the last N calendar days.
+
+    Prefer relative inputs for relative questions, rather than dates calculated
+    from conversation history. For calorie/nutrient totals without individual
+    entries, prefer get_daily_nutrition(days=N).
 
     Returns every food entry logged for the day. Each "Serving" entry is
     enriched (best-effort) with the food's name, source, the serving measure
@@ -158,37 +204,45 @@ def get_food_log(date: str | None = None) -> str:
       - nutrients: the full list of tracked nutrients with amounts and units
 
     Args:
-        date: Date as YYYY-MM-DD (defaults to today).
+        date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
+              Defaults to today in the account timezone, resolved at call time.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date;
+              days=3 includes today, date='yesterday', days=3 excludes today.
+
+    One day returns the usual date/diary/summaries. Multiple days return
+    start_date, end_date, and a days list of those objects, oldest first.
     """
     try:
+        resolved_days = _resolve_read_days(date, days)
         client = _get_client()
-        day = _parse_date(date)
-        data = client.get_diary(day)
-        data = client.enrich_diary_servings(data)
-
-        summary = (data or {}).get("summary") or {}
-        target = (summary.get("macros") or {}).get("energy")
-        consumed = (summary.get("consumed") or {}).get("total")
-        energy_summary: dict | None = None
-        if target is not None and consumed is not None:
-            energy_summary = {
-                "total_target_kcal": target,
-                "consumed_kcal": consumed,
-                "remaining_kcal": round(target - consumed),
-            }
-
-        nutrition_summary = client.get_consumed_nutrients(day)
-
-        return _ok(
-            {
-                "date": date or str(date_module_today()),
-                "energy_summary": energy_summary,
-                "nutrition_summary": nutrition_summary,
-                "diary": data,
-            }
+        return _read_days_response(
+            [_food_log_for_day(client, day) for day in resolved_days]
         )
     except Exception as e:
         return _err(e)
+
+
+def _food_log_for_day(client: CronometerClient, day: date) -> dict:
+    data = client.get_diary(day)
+    data = client.enrich_diary_servings(data)
+
+    summary = (data or {}).get("summary") or {}
+    target = (summary.get("macros") or {}).get("energy")
+    consumed = (summary.get("consumed") or {}).get("total")
+    energy_summary: dict | None = None
+    if target is not None and consumed is not None:
+        energy_summary = {
+            "total_target_kcal": target,
+            "consumed_kcal": consumed,
+            "remaining_kcal": round(target - consumed),
+        }
+
+    return {
+        "date": day.isoformat(),
+        "energy_summary": energy_summary,
+        "nutrition_summary": client.get_consumed_nutrients(day),
+        "diary": data,
+    }
 
 
 # ------------------------------------------------------------------
@@ -343,8 +397,14 @@ def copy_day(date: str | None = None) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-def get_daily_nutrition(date: str | None = None) -> str:
-    """Get daily nutrition summary with consumed macro and micronutrient totals.
+def get_daily_nutrition(
+    date: str | None = None,
+    days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
+) -> str:
+    """Get consumed macro and micronutrient totals for one or more days.
+
+    Use days=N for calories/nutrients over the last N calendar days. Prefer
+    relative inputs over dates calculated from conversation history.
 
     Returns the amounts actually consumed for the day, covering every nutrient
     the user tracks in Cronometer (i.e. has a target set for). The response has:
@@ -359,19 +419,28 @@ def get_daily_nutrition(date: str | None = None) -> str:
     and it will flow through automatically.
 
     Args:
-        date: Date as YYYY-MM-DD (defaults to today).
+        date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
+              Defaults to today in the account timezone, resolved at call time.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date;
+              days=3 includes today, date='yesterday', days=3 excludes today.
+
+    One day returns date, summary, and nutrients. Multiple days return
+    start_date, end_date, and a days list of those objects, oldest first.
     """
     try:
+        resolved_days = _resolve_read_days(date, days)
         client = _get_client()
-        day = _parse_date(date)
-        data = client.get_consumed_nutrients(day)
-        return _ok(
-            {
-                "date": date or str(date_module_today()),
-                "summary": data["macros"],
-                "nutrients": data["nutrients"],
-            }
-        )
+        results = []
+        for day in resolved_days:
+            data = client.get_consumed_nutrients(day)
+            results.append(
+                {
+                    "date": day.isoformat(),
+                    "summary": data["macros"],
+                    "nutrients": data["nutrients"],
+                }
+            )
+        return _read_days_response(results)
     except Exception as e:
         return _err(e)
 
@@ -389,15 +458,17 @@ def get_nutrition_scores(date: str | None = None) -> str:
     the target.
 
     Args:
-        date: Date as YYYY-MM-DD (defaults to today).
+        date: YYYY-MM-DD, today, yesterday, or N days ago. Defaults to today
+              in the account timezone, resolved at call time. Prefer relative
+              inputs for relative questions over dates from conversation history.
     """
     try:
         client = _get_client()
-        day = _parse_date(date)
+        day = _resolve_read_days(date)[0]
         data = client.get_nutrition_scores(day)
         return _ok(
             {
-                "date": date or str(date_module_today()),
+                "date": day.isoformat(),
                 "scores": data,
             }
         )
