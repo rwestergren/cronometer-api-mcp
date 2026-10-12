@@ -728,14 +728,29 @@ class CronometerClient:
                 "defaultMeasureId": 0,
                 "comments": None,
                 "alternateId": None,
+                # The first measure becomes the server-assigned default.
                 "measures": [
                     {
                         "id": 0,
                         "name": serving_name,
                         "value": serving_grams,
                         "amount": 1.0,
-                        "type": "Atomic",
-                    }
+                        "type": "Weight",
+                    },
+                    {
+                        "id": 0,
+                        "name": "g",
+                        "value": 1.0,
+                        "amount": 1.0,
+                        "type": "Weight",
+                    },
+                    {
+                        "id": 0,
+                        "name": "oz",
+                        "value": _OZ_GRAMS,
+                        "amount": 1.0,
+                        "type": "Weight",
+                    },
                 ],
                 "labelType": "AMERICAN_2016",
                 "nutrients": nutrients,

@@ -868,8 +868,38 @@ def test_import_recipe_rejects_blank_input(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# create_custom_food: extra_nutrients
+# create_custom_food
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("serving_grams", [100.0, 200.0])
+def test_create_custom_food_supports_weight_units(tmp_path, serving_grams):
+    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+
+    client.create_custom_food(
+        "Test Food",
+        calories=200,
+        protein_g=10,
+        fat_g=5,
+        carbs_g=20,
+        serving_name="plate",
+        serving_grams=serving_grams,
+    )
+
+    data = state["payloads"][0]["data"]
+    serving, grams, ounces = data["measures"]
+    assert [m["name"] for m in data["measures"]] == ["plate", "g", "oz"]
+    assert all(m["type"] == "Weight" for m in data["measures"])
+    assert all(m["amount"] == 1.0 for m in data["measures"])
+    assert serving["value"] == serving_grams
+    assert grams["value"] == 1.0
+    assert ounces["value"] == pytest.approx(28.3495231)
+
+    nutrients = {n["id"]: n["amount"] for n in data["nutrients"]}
+    assert nutrients[208] == 200 * 100 / serving_grams
+    assert nutrients[203] == 10 * 100 / serving_grams
+    assert nutrients[204] == 5 * 100 / serving_grams
+    assert nutrients[205] == 20 * 100 / serving_grams
 
 
 def test_create_custom_food_extra_nutrients_payload(tmp_path):

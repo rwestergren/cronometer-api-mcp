@@ -168,6 +168,34 @@ def test_update_custom_food_serving_overrides_measure_and_scale(tmp_path):
     assert nutrients_by_id(state["payloads"][1])[208] == 200.0  # 400 per 200 g
 
 
+def test_update_custom_food_preserves_weight_units(tmp_path):
+    food = custom_food()
+    food["measures"][0]["type"] = "Weight"
+    weight_units = [
+        {"id": 901, "name": "g", "amount": 1, "value": 1, "type": "Weight"},
+        {
+            "id": 902,
+            "name": "oz",
+            "amount": 1,
+            "value": 28.3495231,
+            "type": "Weight",
+        },
+    ]
+    food["measures"].extend(dict(unit) for unit in weight_units)
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(
+        FOOD_ID, serving_name="plate", serving_grams=200, calories=400
+    )
+
+    data = state["payloads"][1]["data"]
+    assert data["defaultMeasureId"] == 900
+    assert data["measures"][0]["id"] == 900
+    assert data["measures"][0]["value"] == 200
+    assert data["measures"][1:] == weight_units
+    assert nutrients_by_id(state["payloads"][1])[208] == 200
+
+
 def weight_default_food() -> dict:
     """A food first saved as "400 g": its default measure is 400 units of a
     Weight measure, which the app renders as "400 <name>"."""
