@@ -137,6 +137,7 @@ cached session, so it also overrides a stale cached timezone.
 | `add_custom_food` | Create a custom food with specified nutrition and optional barcodes |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, serving size, or barcodes |
 | `delete_custom_food` | Retire a custom food so it leaves search and the Custom Foods list (existing diary entries are kept) |
+| `delete_recipe` | Delete a recipe or saved meal: retired by default (diary entries are kept), or permanently, which also removes the diary entries that logged it |
 | `add_recipe` | Create a recipe from existing foods referenced by ID and gram weight |
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `copy_day` | Copy all entries from the previous day |

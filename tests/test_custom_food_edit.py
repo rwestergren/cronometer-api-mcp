@@ -1,9 +1,9 @@
-"""update_custom_food / retire_custom_food.
+"""update_custom_food / retire_custom_food / delete_recipe.
 
-Both ride on /api/v2/add_food, which upserts: re-sending a food object with
-its existing id edits it in place, and flipping `retired` hides it from search
-and the Custom Foods list (the app's own delete hard-deletes via an endpoint we
-haven't found; retiring is the closest the known API offers).
+The first two ride on /api/v2/add_food, which upserts: re-sending a food
+object with its existing id edits it in place, and flipping `retired` hides it
+from search and the Custom Foods list. delete_recipe uses the app's own
+/api/v2/del_food, which retires (`retire: true`) or deletes outright.
 """
 
 from __future__ import annotations
@@ -492,6 +492,74 @@ def test_retire_custom_food_refuses_recipes(tmp_path):
         client.retire_custom_food(FOOD_ID)
 
     assert len(state["payloads"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# delete_recipe
+# ---------------------------------------------------------------------------
+
+DELETED = {"result": "SUCCESS", "messages": []}
+
+
+def test_delete_recipe_retires_by_default(tmp_path):
+    client, state = make_cold_client(tmp_path, [recipe(), DELETED])
+
+    result = client.delete_recipe(FOOD_ID)
+
+    sent = state["payloads"][1]
+    assert sent["id"] == FOOD_ID
+    assert sent["retire"] is True
+    assert sent["config"] == {"call_version": 1}
+    assert len(state["payloads"]) == 2  # recent foods untouched
+    assert result == {
+        "food_id": FOOD_ID,
+        "name": "Test Recipe",
+        "meal": False,
+        "permanent": False,
+    }
+
+
+def test_delete_recipe_permanent_deletes_and_clears_recent_foods(tmp_path):
+    client, state = make_cold_client(tmp_path, [recipe(), DELETED, DELETED])
+
+    result = client.delete_recipe(FOOD_ID, permanent=True)
+
+    assert "retire" not in state["payloads"][1]
+    assert state["payloads"][1]["id"] == FOOD_ID
+    assert state["payloads"][2]["servingFoodIds"] == [FOOD_ID]
+    assert state["payloads"][2]["config"] == {"call_version": 2}
+    assert result["permanent"] is True
+
+
+def test_delete_recipe_accepts_saved_meals(tmp_path):
+    client, _ = make_cold_client(tmp_path, [recipe(meal=True), DELETED])
+
+    assert client.delete_recipe(FOOD_ID)["meal"] is True
+
+
+@pytest.mark.parametrize(
+    "food",
+    [custom_food(), recipe(source="USDA")],
+    ids=["plain custom food", "database food"],
+)
+def test_delete_recipe_refuses_non_recipes(tmp_path, food):
+    client, state = make_cold_client(tmp_path, [food, DELETED])
+
+    with pytest.raises(CronometerError, match="not a recipe or meal"):
+        client.delete_recipe(FOOD_ID)
+
+    assert len(state["payloads"]) == 1
+
+
+def test_delete_recipe_raises_when_server_fails(tmp_path):
+    client, state = make_cold_client(
+        tmp_path, [recipe(), {"result": "FAIL", "error": "nope"}]
+    )
+    # A FAIL triggers one re-login and retry; keep failing so it surfaces.
+    with pytest.raises(CronometerError):
+        client.delete_recipe(FOOD_ID)
+
+    assert all("servingFoodIds" not in p for p in state["payloads"])
 
 
 # ---------------------------------------------------------------------------
