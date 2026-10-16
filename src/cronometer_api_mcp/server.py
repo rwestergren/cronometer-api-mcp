@@ -258,6 +258,9 @@ def _food_log_for_day(client: CronometerClient, day: date) -> dict:
 # ------------------------------------------------------------------
 
 
+_DIARY_GROUPS = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
+
+
 @mcp.tool(annotations=_WRITE)
 def add_food_entry(
     food_id: int,
@@ -282,15 +285,7 @@ def add_food_entry(
                      "dinner", "snacks" (case-insensitive, default "auto").
     """
     try:
-        group_map = {
-            "auto": 0,
-            "breakfast": 1,
-            "lunch": 2,
-            "dinner": 3,
-            "snacks": 4,
-        }
-        group_key = diary_group.strip().lower()
-        group_int = group_map.get(group_key)
+        group_int = _DIARY_GROUPS.get(diary_group.strip().lower())
         if group_int is None:
             return _err(
                 ValueError(
@@ -315,6 +310,51 @@ def add_food_entry(
                 "note": "Use the serving ID to remove this entry with remove_food_entry.",
             }
         )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def update_food_entry(
+    entry_id: str,
+    date: str | None = None,
+    grams: float | None = None,
+    measure_id: int | None = None,
+    diary_group: str | None = None,
+) -> str:
+    """Change a logged food entry: its amount, its measure, or its meal.
+
+    Use get_food_log to find the entry ID. Pass only what should change.
+
+    Args:
+        entry_id: Serving/entry ID from get_food_log.
+        date: Date the entry is logged on as YYYY-MM-DD (defaults to today).
+        grams: New weight of the serving in grams.
+        measure_id: New measure/unit ID from get_food_details (the amount is
+            still given in grams).
+        diary_group: Move to another meal -- one of "breakfast", "lunch",
+            "dinner", "snacks" (case-insensitive).
+    """
+    try:
+        group_int = None
+        if diary_group is not None:
+            group_int = _DIARY_GROUPS.get(diary_group.strip().lower())
+            if not group_int:
+                return _err(
+                    ValueError(
+                        f"Invalid diary_group '{diary_group}'. "
+                        "Must be one of: breakfast, lunch, dinner, snacks."
+                    )
+                )
+        client = _get_client()
+        entry = client.update_serving(
+            entry_id,
+            _parse_date(date),
+            grams=grams,
+            measure_id=measure_id,
+            diary_group=group_int,
+        )
+        return _ok({"entry": entry})
     except Exception as e:
         return _err(e)
 
