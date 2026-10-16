@@ -12,6 +12,7 @@ import asyncio
 import threading
 
 EXPECTED_TOOLS = {
+    "add_biometric",
     "add_custom_food",
     "add_food_entry",
     "add_recipe",

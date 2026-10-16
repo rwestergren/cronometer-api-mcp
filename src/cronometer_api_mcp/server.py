@@ -1043,6 +1043,35 @@ def get_biometrics(
         return _err(e)
 
 
+@mcp.tool(annotations=_WRITE)
+def add_biometric(
+    metric_id: int,
+    unit_id: int,
+    amount: float,
+    date: str | None = None,
+) -> str:
+    """Record a biometric reading such as a weight or body fat.
+
+    Use list_biometrics for metric_id and unit_id (e.g. Weight is metric_id 1
+    with unit_id 1 for kg; Body Fat is metric_id 8 with unit_id 13 for %).
+    The reading appears in get_food_log's diary as a "Biometric" entry;
+    remove_food_entry with its biometricId deletes it.
+
+    Args:
+        metric_id: Numeric metric ID from list_biometrics.
+        unit_id: Numeric unit ID from the metric's units; the amount is in
+            this unit.
+        amount: The reading.
+        date: Date as YYYY-MM-DD (defaults to today).
+    """
+    try:
+        client = _get_client()
+        result = client.add_biometric(metric_id, unit_id, amount, _parse_date(date))
+        return _ok({"biometric": result})
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
