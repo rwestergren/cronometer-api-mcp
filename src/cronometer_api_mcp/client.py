@@ -1428,6 +1428,86 @@ class CronometerClient:
         return data
 
     # ------------------------------------------------------------------
+    # Diary: notes
+    # ------------------------------------------------------------------
+
+    def add_note(
+        self, text: str, day: date | None = None, diary_group: int = 0
+    ) -> dict:
+        """Add a note to a diary day.
+
+        Args:
+            text: The note text.
+            day: Date to add it to. Defaults to today.
+            diary_group: Meal group the note sits in, as for add_serving:
+                0 = auto (by time of day), 1 = Breakfast, 2 = Lunch,
+                3 = Dinner, 4 = Snacks.
+
+        Returns the stored note: {"noteId", "text", "day", "order", ...}.
+        """
+        if diary_group == 0:
+            diary_group = _meal_group_for_hour(self.now().hour)
+        return self._save_note(0, text, self._format_day(day), (diary_group << 16) | 1)
+
+    def update_note(self, note_id: int, text: str, day: date | None = None) -> dict:
+        """Replace the text of an existing diary note, keeping its place.
+
+        Returns the stored note.
+        """
+        entries = self.get_diary(day).get("diary", [])
+        note = next(
+            (
+                e
+                for e in entries
+                if e.get("type") == "Note" and str(e.get("noteId")) == str(note_id)
+            ),
+            None,
+        )
+        if note is None:
+            raise CronometerError(
+                f"No note {note_id} in the diary for {self._format_day(day)}"
+            )
+        return self._save_note(note["noteId"], text, note["day"], note["order"])
+
+    def _save_note(self, note_id: int, text: str, day_str: str, order: int) -> dict:
+        """Create (note_id 0) or overwrite a note via /photoupload.
+
+        The app writes notes through its photo upload endpoint: a multipart
+        form, authenticated by the session token in a `sessionKey` field
+        rather than the JSON auth block. deleteExistingPhoto is what the app
+        sends for a text-only note.
+        """
+        if not text.strip():
+            raise ValueError("note text must not be empty")
+        self._ensure_auth()
+        fields = {
+            "action": "diaryImage",
+            "sessionKey": self._token,
+            "noteId": str(note_id),
+            "day": day_str,
+            "order": str(order),
+            "deleteExistingPhoto": "true",
+            "noteText": text,
+        }
+        form = httpx.Request(
+            "POST", "/", files={k: (None, v) for k, v in fields.items()}
+        )
+        resp = self._http.post(
+            "/photoupload",
+            content=form.read(),
+            headers={"content-type": form.headers["content-type"]},
+        )
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise CronometerError(f"Failed to save note: {resp.text[:300]}") from None
+        if not isinstance(data, dict) or "noteId" not in data:
+            raise CronometerError(f"Failed to save note: {data}")
+        logger.info("Saved note %s on %s", data["noteId"], day_str)
+        return data
+
+    # ------------------------------------------------------------------
     # Diary: get diary entries
     # ------------------------------------------------------------------
 
