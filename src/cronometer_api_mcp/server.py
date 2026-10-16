@@ -557,16 +557,25 @@ def get_food_details(food_id: int) -> str:
                 }
             )
 
-        return _ok(
-            {
-                "food_id": data.get("id"),
-                "name": data.get("name"),
-                "default_measure_id": data.get("defaultMeasureId"),
-                "measures": measures,
-                "barcodes": data.get("barcodes", []),
-                "nutrients": data.get("nutrients", []),
-            }
-        )
+        result = {
+            "food_id": data.get("id"),
+            "name": data.get("name"),
+            "default_measure_id": data.get("defaultMeasureId"),
+            "measures": measures,
+            "barcodes": data.get("barcodes", []),
+            "nutrients": data.get("nutrients", []),
+        }
+        if data.get("ingredients"):
+            # Recipes and meals: in the shape add_recipe/update_recipe take.
+            result["ingredients"] = [
+                {
+                    "food_id": i.get("foodId"),
+                    "grams": i.get("grams"),
+                    "measure_id": i.get("measureId"),
+                }
+                for i in data["ingredients"]
+            ]
+        return _ok(result)
     except Exception as e:
         return _err(e)
 
@@ -800,19 +809,7 @@ def add_recipe(
         comments: Free-text recipe notes.
     """
     try:
-        parsed = []
-        for item in ingredients:
-            if "food_id" not in item or "grams" not in item:
-                return _err(
-                    ValueError(
-                        f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
-                    )
-                )
-            if item.get("measure_id") is not None:
-                parsed.append((item["food_id"], item["grams"], item["measure_id"]))
-            else:
-                parsed.append((item["food_id"], item["grams"]))
-
+        parsed = _parse_ingredients(ingredients)
         client = _get_client()
         result = client.create_recipe(
             name,
@@ -836,6 +833,62 @@ def add_recipe(
         )
     except Exception as e:
         return _err(e)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def update_recipe(
+    food_id: int,
+    name: str | None = None,
+    ingredients: list[dict] | None = None,
+    serving_grams: float | None = None,
+    comments: str | None = None,
+) -> str:
+    """Edit a recipe you created: rename it, change its ingredients or
+    amounts, resize its default serving, or change its notes.
+
+    Pass only what should change. A new ingredient list replaces the whole
+    old one (use get_food_details to read the current ingredients first), and
+    the nutrition is recalculated from it. Diary entries that already logged
+    the recipe keep pointing at it and follow the new nutrition, as in the
+    app. Saved meals cannot be edited with this tool.
+
+    Args:
+        food_id: The recipe's food ID.
+        name: New recipe name.
+        ingredients: New list of {"food_id": int, "grams": float} objects,
+            with an optional "measure_id", as for add_recipe.
+        serving_grams: New weight of the default serving in grams. If omitted
+            and the serving was the whole batch, it follows the new batch.
+        comments: New free-text recipe notes.
+    """
+    try:
+        parsed = _parse_ingredients(ingredients) if ingredients is not None else None
+        client = _get_client()
+        result = client.update_recipe(
+            food_id,
+            name=name,
+            ingredients=parsed,
+            serving_grams=serving_grams,
+            comments=comments,
+        )
+        return _ok(result)
+    except Exception as e:
+        return _err(e)
+
+
+def _parse_ingredients(ingredients: list[dict]) -> list[tuple]:
+    """Turn the tools' ingredient dicts into create_recipe tuples."""
+    parsed = []
+    for item in ingredients:
+        if "food_id" not in item or "grams" not in item:
+            raise ValueError(
+                f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
+            )
+        if item.get("measure_id") is not None:
+            parsed.append((item["food_id"], item["grams"], item["measure_id"]))
+        else:
+            parsed.append((item["food_id"], item["grams"]))
+    return parsed
 
 
 @mcp.tool(annotations=_WRITE)
