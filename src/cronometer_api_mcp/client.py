@@ -1452,28 +1452,33 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     def delete_entries(self, entry_ids: list[str], day: date | None = None) -> dict:
-        """Remove diary entries by their serving IDs.
+        """Remove diary entries by their IDs.
 
-        Fetches the diary for the given day, matches entries by servingId,
-        and sends the full serving objects to the v3 DELETE endpoint.
+        Fetches the diary for the given day, matches entries by their ID --
+        servingId for foods, exerciseId for exercises, noteId for notes,
+        biometricId for biometrics -- and sends them to the v3 DELETE
+        endpoint in the shape the app uses (see _v3_diary_entry).
 
         Uses: DELETE /api/v3/user/{userId}/diary-entries
 
         Args:
-            entry_ids: List of serving IDs to delete (as strings).
+            entry_ids: List of entry IDs to delete (as strings).
             day: The day the entries belong to. Defaults to today.
 
         Returns dict with removed IDs and count.
         """
-        # Fetch the diary to get full serving objects (required by v3 API)
+        # Fetch the diary to get full entry objects (required by v3 API)
         diary_data = self.get_diary(day)
         diary_entries = diary_data.get("diary", [])
 
         id_set = {str(eid) for eid in entry_ids}
         to_delete = []
+        removed_ids = []
         for entry in diary_entries:
-            if str(entry.get("servingId")) in id_set:
-                to_delete.append(entry)
+            entry_id = _diary_entry_id(entry)
+            if entry_id is not None and str(entry_id) in id_set:
+                to_delete.append(_v3_diary_entry(entry))
+                removed_ids.append(str(entry_id))
 
         if not to_delete:
             logger.warning(
@@ -1489,7 +1494,6 @@ class CronometerClient:
         )
 
         if resp.status_code == 204:
-            removed_ids = [str(e["servingId"]) for e in to_delete]
             logger.info(
                 "Deleted %d entries for %s: %s",
                 len(removed_ids),
@@ -1989,6 +1993,39 @@ def _translation_id(food: dict) -> int:
         if isinstance(first, dict):
             return first.get("translationId") or 0
     return 0
+
+
+# The id key get_diary uses for each diary entry type.
+_DIARY_ENTRY_ID_KEYS = {
+    "Serving": "servingId",
+    "Exercise": "exerciseId",
+    "Note": "noteId",
+    "Biometric": "biometricId",
+}
+
+
+def _diary_entry_id(entry: dict) -> int | None:
+    """The id of a get_diary entry, whatever its type."""
+    key = _DIARY_ENTRY_ID_KEYS.get(entry.get("type", "Serving"), "servingId")
+    return entry.get(key)
+
+
+def _v3_diary_entry(entry: dict) -> dict:
+    """Reshape a get_diary entry into what the v3 delete accepts.
+
+    Servings and exercises go back as they are. Notes and biometrics are
+    keyed by a plain `id` there (with noteId/biometricId the server answers
+    204 but deletes nothing, or 400). The v3 endpoint also wants `meta` as a
+    JSON string, not the object get_diary returns, or it answers 400 "Not
+    able to deserialize data provided". Both verified against the live API
+    and matching what the app sends.
+    """
+    out = dict(entry)
+    if out.get("type") in ("Note", "Biometric"):
+        out["id"] = out.pop(_DIARY_ENTRY_ID_KEYS[out["type"]])
+    if isinstance(out.get("meta"), dict):
+        out["meta"] = json.dumps(out["meta"], separators=(",", ":"))
+    return out
 
 
 def _meal_group_for_hour(hour: int) -> int:
