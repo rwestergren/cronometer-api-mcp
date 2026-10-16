@@ -1001,8 +1001,8 @@ def set_macro_split(protein: float, carbs: float, fat: float) -> str:
     put back. Values are percent of energy and must add up to 100.
 
     Args:
-        protein: Protein share in percent (e.g. 27).
-        carbs: Carbohydrate share in percent (e.g. 43).
+        protein: Protein share in percent (e.g. 30).
+        carbs: Carbohydrate share in percent (e.g. 40).
         fat: Fat share in percent (e.g. 30).
     """
     try:

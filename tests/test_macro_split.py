@@ -15,14 +15,14 @@ def test_get_macro_split_reads_profile_prefs(tmp_path):
     profile = {
         "prefs": [
             {"macroLipids": 30.0},
-            {"tz": 120},
-            {"macroProtein": "27.0"},
-            {"macroCarbs": "43.0"},
+            {"tz": 0},
+            {"macroProtein": "30.0"},
+            {"macroCarbs": "40.0"},
         ]
     }
     client, _ = make_cold_client(tmp_path, [profile])
 
-    assert client.get_macro_split() == {"protein": 27.0, "carbs": 43.0, "fat": 30.0}
+    assert client.get_macro_split() == {"protein": 30.0, "carbs": 40.0, "fat": 30.0}
 
 
 def test_get_macro_split_unset_share_is_none(tmp_path):
@@ -34,15 +34,15 @@ def test_get_macro_split_unset_share_is_none(tmp_path):
 def test_set_macro_split_writes_all_three_prefs(tmp_path):
     client, state = make_cold_client(tmp_path, [SET_OK])
 
-    result = client.set_macro_split(26, 44, 30)
+    result = client.set_macro_split(25, 45, 30)
 
     assert [(p["key"], p["val"]) for p in state["payloads"]] == [
-        ("macroProtein", "26.0"),
-        ("macroCarbs", "44.0"),
+        ("macroProtein", "25.0"),
+        ("macroCarbs", "45.0"),
         ("macroLipids", "30.0"),
     ]
     assert all(p["config"] == {"call_version": 1} for p in state["payloads"])
-    assert result == {"protein": 26, "carbs": 44, "fat": 30}
+    assert result == {"protein": 25, "carbs": 45, "fat": 30}
 
 
 @pytest.mark.parametrize(
@@ -61,4 +61,4 @@ def test_set_macro_split_raises_on_unexpected_response(tmp_path):
     client, _ = make_cold_client(tmp_path, [{"messages": []}])
 
     with pytest.raises(CronometerError, match="macroProtein"):
-        client.set_macro_split(27, 43, 30)
+        client.set_macro_split(30, 40, 30)
