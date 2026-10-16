@@ -1043,6 +1043,73 @@ def get_biometrics(
         return _err(e)
 
 
+@mcp.tool(annotations=_READ_ONLY)
+def search_activities(query: str) -> str:
+    """Find activities to log with add_exercise, by name.
+
+    Searches Cronometer's two activity catalogs: the current one ("General
+    Walking", "HIIT") and the older, more specific one ("Walking 3.0 mph,
+    moderate"). Every word of the query must appear in the name.
+
+    Args:
+        query: Activity name or keywords (e.g. "walking", "cycling").
+    """
+    try:
+        client = _get_client()
+        words = query.lower().split()
+        matches = [
+            {"activity_id": a["id"], "name": a["name"], "legacy": a["legacy"]}
+            for a in client.get_activities()
+            if all(w in a["name"].lower() for w in words)
+        ]
+        return _ok({"query": query, "count": len(matches), "activities": matches})
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE)
+def add_exercise(
+    activity_id: int,
+    minutes: float,
+    calories: float,
+    date: str | None = None,
+    diary_group: str = "auto",
+) -> str:
+    """Log an exercise to the Cronometer diary.
+
+    Use search_activities to find activity_id. The calorie burn is not
+    calculated for you: pass it (estimate it from the activity's MET value,
+    the minutes and the user's weight if the user doesn't know it). The
+    exercise appears in get_food_log's diary as an "Exercise" entry;
+    remove_food_entry with its exerciseId deletes it.
+
+    Args:
+        activity_id: Activity ID from search_activities.
+        minutes: Duration in minutes.
+        calories: Calories burned, as a positive number.
+        date: Date as YYYY-MM-DD (defaults to today).
+        diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
+            "dinner", "snacks" (default "auto").
+    """
+    try:
+        groups = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
+        group_int = groups.get(diary_group.strip().lower())
+        if group_int is None:
+            return _err(
+                ValueError(
+                    f"Invalid diary_group '{diary_group}'. "
+                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
+                )
+            )
+        client = _get_client()
+        result = client.add_exercise(
+            activity_id, minutes, calories, _parse_date(date), group_int
+        )
+        return _ok({"exercise": result})
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------

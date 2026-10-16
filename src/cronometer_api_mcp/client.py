@@ -1960,6 +1960,115 @@ class CronometerClient:
         )
         return data
 
+    # ------------------------------------------------------------------
+    # Exercise
+    # ------------------------------------------------------------------
+
+    def get_activities(self) -> list[dict]:
+        """List every activity an exercise can be logged as.
+
+        The app's activity picker merges two catalogs: the current one from
+        /api/v2/get_activity_forest (about 200 activities, ids from 1135 up,
+        grouped into categories) and the older, more detailed one from
+        /api/v2/all_legacy_activities (about 1100, ids 1-1134, e.g. "Walking
+        3.0 mph, moderate"). The id ranges don't overlap, and add_exercise
+        accepts ids from either.
+
+        Returns [{"id": int, "name": str, "legacy": bool}, ...].
+        """
+        config = {"config": {"call_version": 1}}
+        forest = self._request("/api/v2/get_activity_forest", dict(config))
+        legacy = self._request("/api/v2/all_legacy_activities", dict(config))
+        activities = [
+            {"id": a["id"], "name": a["name"], "legacy": False}
+            for a in (forest.get("activitiesMap") or {}).values()
+        ]
+        activities += [
+            {"id": a["id"], "name": a["name"], "legacy": True}
+            for a in legacy.get("activities") or []
+        ]
+        return activities
+
+    def add_exercise(
+        self,
+        activity_id: int,
+        minutes: float,
+        calories: float,
+        day: date | None = None,
+        diary_group: int = 0,
+    ) -> dict:
+        """Log an exercise with a given calorie burn.
+
+        The app computes the burn itself from the activity, the minutes and
+        the user's weight and sends it with calorieOverride false. Here the
+        caller supplies it and calorieOverride is set, so no activity
+        intensity data is needed. The server still requires the body weight
+        (in lb), which is taken from the profile.
+
+        Args:
+            activity_id: Activity ID from get_activities.
+            minutes: Duration in minutes.
+            calories: Calories burned (a positive number).
+            day: Date to log to. Defaults to today.
+            diary_group: Meal group, as for add_serving (0 = auto).
+
+        Uses: POST /api/v2/add_exercise
+
+        Returns {"exerciseId": int, "activityId", "minutes", "calories", "day"}.
+        """
+        if not math.isfinite(minutes) or minutes <= 0:
+            raise ValueError(f"minutes must be positive, got {minutes}")
+        if not math.isfinite(calories) or calories < 0:
+            raise ValueError(f"calories must be zero or positive, got {calories}")
+        if diary_group == 0:
+            diary_group = _meal_group_for_hour(self.now().hour)
+
+        exercise = {
+            "exerciseId": None,
+            "type": "Exercise",
+            "activityId": activity_id,
+            "activitySpecId": None,
+            "minutes": minutes,
+            "calories": -calories,  # stored negative: energy out
+            "calorieOverride": True,
+            "weight": round(self._profile_weight_kg() / _KG_PER_LB, 1),
+            "day": self._format_day(day),
+            "order": (diary_group << 16) | 1,
+            "name": None,
+            "meta": None,
+            "externalId": None,
+            "source": None,
+            "userId": self.user_id,
+        }
+        payload = {"exercise": exercise, "config": {"call_version": 1}}
+        data = self._request("/api/v2/add_exercise", payload)
+        if not data.get("id"):
+            raise CronometerError(f"Failed to add exercise: {data}")
+        logger.info(
+            "Logged exercise %d (%.0f min, %.0f kcal) on %s",
+            activity_id,
+            minutes,
+            calories,
+            exercise["day"],
+        )
+        return {
+            "exerciseId": data["id"],
+            "activityId": activity_id,
+            "minutes": minutes,
+            "calories": calories,
+            "day": (day or self.today()).isoformat(),
+        }
+
+    def _profile_weight_kg(self) -> float:
+        """The current body weight from the profile's prefs, in kg."""
+        profile = self._request("/api/v2/get_profile", {"config": {"call_version": 1}})
+        for pref in profile.get("prefs") or []:
+            if "weightInKG" in pref:
+                return float(pref["weightInKG"])
+        raise CronometerError(
+            "The profile has no weight; set one in Cronometer before logging exercise"
+        )
+
 
 # ======================================================================
 # Helpers
@@ -1989,6 +2098,9 @@ def _translation_id(food: dict) -> int:
         if isinstance(first, dict):
             return first.get("translationId") or 0
     return 0
+
+
+_KG_PER_LB = 0.45359237
 
 
 def _meal_group_for_hour(hour: int) -> int:
