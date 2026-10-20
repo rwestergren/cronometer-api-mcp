@@ -151,6 +151,7 @@ cached session, so it also overrides a stale cached timezone.
 | `get_fasting_stats` | Aggregate fasting statistics |
 | `list_biometrics` | List trackable biometric metrics and their units |
 | `get_biometrics` | Biometric time series (e.g. weight, body fat) within a date range |
+| `add_biometric` | Record a biometric reading such as a weight or body fat |
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
