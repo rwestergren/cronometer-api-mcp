@@ -146,6 +146,8 @@ cached session, so it also overrides a stale cached timezone.
 
 | Tool | Description |
 |------|-------------|
+| `search_activities` | Find activities to log as exercise, by name |
+| `add_exercise` | Log an exercise with its duration and calories burned |
 | `get_macro_targets` | Weekly macro schedule and saved target templates |
 | `get_fasting_history` | Fasting history within a date range |
 | `get_fasting_stats` | Aggregate fasting statistics |
