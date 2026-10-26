@@ -992,9 +992,7 @@ class CronometerClient:
 
         Sets `retired` on the food and saves it. A retired food drops out of
         search and the Custom Foods list but stays readable by id and keeps
-        existing diary entries intact. The app's own delete removes the food
-        outright through an endpoint this client doesn't know; retiring is the
-        closest the known API offers, and it is idempotent.
+        existing diary entries intact. It is idempotent.
 
         Returns {"food_id": int, "name": str, "retired": True}.
         """
@@ -1004,6 +1002,55 @@ class CronometerClient:
             self._save_custom_food(food)
         logger.info("Retired custom food %r (id=%d)", food.get("name"), food_id)
         return {"food_id": food_id, "name": food.get("name"), "retired": True}
+
+    def delete_recipe(self, food_id: int, *, permanent: bool = False) -> dict:
+        """Delete a user-created recipe or saved meal.
+
+        Uses /api/v2/del_food, the app's own delete. By default it sends
+        `retire: true`, which is what the app does for a food that is already
+        logged: the recipe leaves search and the My Foods lists, but stays
+        readable by id and every diary entry that uses it is kept.
+
+        With permanent=True the flag is left off and the server deletes the
+        recipe outright. That also removes every diary entry that logged it
+        (verified against the live API), so it is only safe for a recipe that
+        was never logged. The app then drops the id from the recent-foods
+        list via /api/v2/delete_recent_foods; so does this method.
+
+        Plain custom foods are refused here; retire_custom_food handles them.
+
+        Returns {"food_id": int, "name": str, "meal": bool, "permanent": bool}.
+        """
+        with self._food_lock(food_id):
+            food = self.get_food(food_id)
+            if food.get("source") != "Custom" or not food.get("ingredients"):
+                raise CronometerError(
+                    f"Food {food_id} ({food.get('name')!r}) is not a recipe or "
+                    f"meal you created; use delete_custom_food for custom foods"
+                )
+            payload: dict = {"id": food_id, "config": {"call_version": 1}}
+            if not permanent:
+                payload["retire"] = True
+            data = self._request("/api/v2/del_food", payload)
+            if data.get("result") != "SUCCESS":
+                raise CronometerError(f"Failed to delete recipe {food_id}: {data}")
+            if permanent:
+                self._request(
+                    "/api/v2/delete_recent_foods",
+                    {"servingFoodIds": [food_id], "config": {"call_version": 2}},
+                )
+        logger.info(
+            "%s recipe %r (id=%d)",
+            "Deleted" if permanent else "Retired",
+            food.get("name"),
+            food_id,
+        )
+        return {
+            "food_id": food_id,
+            "name": food.get("name"),
+            "meal": bool(food.get("meal")),
+            "permanent": permanent,
+        }
 
     # ------------------------------------------------------------------
     # Recipe creation
