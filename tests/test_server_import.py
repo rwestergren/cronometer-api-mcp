@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "mark_day_complete",
     "remove_food_entry",
     "search_foods",
+    "set_macro_split",
     "update_custom_food",
 }
 
