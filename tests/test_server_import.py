@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "get_nutrition_scores",
     "import_recipe",
     "list_biometrics",
+    "lookup_barcode",
     "mark_day_complete",
     "remove_food_entry",
     "search_foods",

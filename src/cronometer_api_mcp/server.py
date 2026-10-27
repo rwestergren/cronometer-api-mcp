@@ -571,6 +571,46 @@ def get_food_details(food_id: int) -> str:
         return _err(e)
 
 
+@mcp.tool(annotations=_READ_ONLY)
+def lookup_barcode(barcode: str) -> str:
+    """Find foods by the barcode on their package (EAN, UPC or GTIN).
+
+    The same lookup the app's barcode scanner does. Returns each matching
+    food with the measure_ids needed for add_food_entry; an empty list means
+    Cronometer doesn't know the code (search_foods by name instead).
+
+    Args:
+        barcode: The digits under the bars, e.g. "4006381333931". Spaces and
+            dashes are fine; the check digit is verified.
+    """
+    try:
+        client = _get_client()
+        foods = client.lookup_barcode(barcode)
+        results = []
+        for f in foods:
+            results.append(
+                {
+                    "food_id": f.get("id"),
+                    "name": f.get("name"),
+                    "source": f.get("source"),
+                    "default_measure_id": f.get("defaultMeasureId"),
+                    "measures": [
+                        {
+                            "measure_id": m.get("id"),
+                            "name": m.get("name"),
+                            "grams": m.get("value"),
+                            "quantity": m.get("amount"),
+                        }
+                        for m in f.get("measures", [])
+                    ],
+                    "barcodes": f.get("barcodes", []),
+                }
+            )
+        return _ok({"barcode": barcode, "count": len(results), "foods": results})
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Custom food creation
 # ------------------------------------------------------------------

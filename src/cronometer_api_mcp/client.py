@@ -642,6 +642,30 @@ class CronometerClient:
         logger.info("Batch-fetched %d/%d foods", len(foods), len(food_ids))
         return foods
 
+    def lookup_barcode(self, barcode: str) -> list[dict]:
+        """Find foods by product barcode, as the app's scanner does.
+
+        Uses /api/v2/barcode, which answers with full food objects (the same
+        shape as get_food). The server matches loosely: leading zeros are
+        ignored (UPC-A "049000050103" finds foods stored as "49000050103")
+        and a placeholder code like "0000000000000" returns unrelated foods
+        whose stored barcode is "0". So the code is validated first (all zeros
+        is refused) and only foods that actually carry it are returned. An unknown code returns
+        an empty list.
+        """
+        (code,) = normalize_barcodes([barcode])
+        if not code.strip("0"):
+            raise ValueError(f"barcode {barcode!r} is all zeros, not a product code")
+        payload = {"query": code, "config": {"call_version": 2}}
+        data = self._request("/api/v2/barcode", payload)
+        foods = [
+            f
+            for f in data.get("foods") or []
+            if any(b.lstrip("0") == code.lstrip("0") for b in f.get("barcodes") or [])
+        ]
+        logger.info("Barcode %s matched %d foods", code, len(foods))
+        return foods
+
     # ------------------------------------------------------------------
     # Custom food creation
     # ------------------------------------------------------------------
