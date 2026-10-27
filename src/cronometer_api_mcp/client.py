@@ -1960,6 +1960,65 @@ class CronometerClient:
         )
         return data
 
+    def add_biometric(
+        self,
+        metric_id: int,
+        unit_id: int,
+        amount: float,
+        day: date | None = None,
+    ) -> dict:
+        """Record a biometric value (e.g. a weight or body fat reading).
+
+        Args:
+            metric_id: Metric ID from get_metrics (e.g. 1 for Weight,
+                8 for Body Fat).
+            unit_id: Unit ID from that metric's units (e.g. 1 for kg, 2 for
+                lbs). The value is stored in this unit.
+            amount: The reading.
+            day: Date of the reading. Defaults to today.
+
+        Several readings of one metric can share a day; get_biometrics then
+        reports their average. A reading on an earlier day doesn't change
+        the profile's current weight.
+
+        Uses: POST /api/v2/add_biometric
+
+        Returns {"biometricId": int, "metricId", "unitId", "amount", "day"}.
+        """
+        if not math.isfinite(amount) or amount < 0:
+            raise ValueError(f"amount must be a non-negative number, got {amount}")
+        biometric = {
+            "biometricId": 0,
+            "type": "Biometric",
+            "metricId": metric_id,
+            "unitId": unit_id,
+            "amount": amount,
+            "day": self._format_day(day),
+            "order": 1,
+            "meta": None,
+            "externalId": None,
+            "source": None,
+            "userId": self.user_id,
+        }
+        payload = {"biometric": biometric, "config": {"call_version": 1}}
+        data = self._request("/api/v2/add_biometric", payload)
+        if not data.get("id"):
+            raise CronometerError(f"Failed to add biometric: {data}")
+        logger.info(
+            "Recorded metric %d = %s (unit %d) on %s",
+            metric_id,
+            amount,
+            unit_id,
+            biometric["day"],
+        )
+        return {
+            "biometricId": data["id"],
+            "metricId": metric_id,
+            "unitId": unit_id,
+            "amount": amount,
+            "day": (day or self.today()).isoformat(),
+        }
+
 
 # ======================================================================
 # Helpers
