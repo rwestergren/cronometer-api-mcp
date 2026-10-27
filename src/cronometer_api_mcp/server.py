@@ -348,6 +348,57 @@ def remove_food_entry(
 
 
 # ------------------------------------------------------------------
+# Diary: notes
+# ------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_WRITE)
+def add_note(text: str, date: str | None = None, diary_group: str = "auto") -> str:
+    """Add a note to a diary day.
+
+    Notes show up in get_food_log's diary as entries of type "Note". Remove
+    one with remove_food_entry and its noteId.
+
+    Args:
+        text: The note text.
+        date: Date as YYYY-MM-DD (defaults to today).
+        diary_group: Meal slot the note sits in -- one of "auto",
+            "breakfast", "lunch", "dinner", "snacks" (default "auto").
+    """
+    try:
+        groups = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
+        group_int = groups.get(diary_group.strip().lower())
+        if group_int is None:
+            return _err(
+                ValueError(
+                    f"Invalid diary_group '{diary_group}'. "
+                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
+                )
+            )
+        client = _get_client()
+        note = client.add_note(text, _parse_date(date), group_int)
+        return _ok({"note": note})
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def update_note(note_id: int, text: str, date: str | None = None) -> str:
+    """Replace the text of a diary note.
+
+    Args:
+        note_id: noteId of the note, from get_food_log.
+        text: The new note text.
+        date: Date the note is on as YYYY-MM-DD (defaults to today).
+    """
+    try:
+        client = _get_client()
+        return _ok({"note": client.update_note(note_id, text, _parse_date(date))})
+    except Exception as e:
+        return _err(e)
+
+
+# ------------------------------------------------------------------
 # Diary: management
 # ------------------------------------------------------------------
 

@@ -14,6 +14,7 @@ import threading
 EXPECTED_TOOLS = {
     "add_custom_food",
     "add_food_entry",
+    "add_note",
     "add_recipe",
     "copy_day",
     "delete_custom_food",
@@ -31,6 +32,7 @@ EXPECTED_TOOLS = {
     "remove_food_entry",
     "search_foods",
     "update_custom_food",
+    "update_note",
 }
 
 

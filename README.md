@@ -141,6 +141,8 @@ cached session, so it also overrides a stale cached timezone.
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
+| `add_note` | Add a note to a diary day |
+| `update_note` | Replace the text of a diary note |
 
 ### Targets & Tracking
 
