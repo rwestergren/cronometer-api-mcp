@@ -1427,6 +1427,75 @@ class CronometerClient:
         )
         return data
 
+    def update_serving(
+        self,
+        serving_id: str | int,
+        day: date | None = None,
+        *,
+        grams: float | None = None,
+        measure_id: int | None = None,
+        diary_group: int | None = None,
+    ) -> dict:
+        """Change the amount, measure or meal group of a logged serving.
+
+        Fetches the day's diary, takes the serving as stored and sends it back
+        to /api/v2/edit_serving with the changed fields. The server keeps the
+        serving id. The meal group lives in the high bits of `order` (see
+        add_serving); a moved serving goes to the end of its new group. The
+        app moves entries with /api/v2/update_order, but edit_serving accepts
+        a new `order` as well (verified against the live API), so one call
+        covers both.
+
+        Args:
+            serving_id: The servingId from get_diary.
+            day: The day the serving is logged on. Defaults to today.
+            grams: New weight in grams.
+            measure_id: New display measure (grams stays the amount).
+            diary_group: New meal group, 1 = Breakfast, 2 = Lunch,
+                3 = Dinner, 4 = Snacks.
+
+        Returns the updated serving as sent.
+        """
+        if grams is None and measure_id is None and diary_group is None:
+            raise ValueError("update_serving needs grams, measure_id or diary_group")
+        if grams is not None and grams <= 0:
+            raise ValueError(f"grams must be positive, got {grams}")
+        if diary_group is not None and diary_group not in (1, 2, 3, 4):
+            raise ValueError(f"diary_group must be 1-4, got {diary_group}")
+
+        entries = self.get_diary(day).get("diary", [])
+        serving = next(
+            (e for e in entries if str(e.get("servingId")) == str(serving_id)),
+            None,
+        )
+        if serving is None:
+            raise CronometerError(
+                f"No serving {serving_id} in the diary for {self._format_day(day)}"
+            )
+
+        serving = dict(serving)
+        if grams is not None:
+            serving["grams"] = grams
+        if measure_id is not None:
+            serving["measureId"] = measure_id
+        if diary_group is not None and serving.get("order", 0) >> 16 != diary_group:
+            last = max(
+                (
+                    e.get("order", 0) & 0xFFFF
+                    for e in entries
+                    if e.get("order", 0) >> 16 == diary_group
+                ),
+                default=0,
+            )
+            serving["order"] = (diary_group << 16) | (last + 1)
+
+        payload = {"serving": serving, "config": {"call_version": 2}}
+        data = self._request("/api/v2/edit_serving", payload)
+        if str(data.get("id")) != str(serving["servingId"]):
+            raise CronometerError(f"Failed to update serving {serving_id}: {data}")
+        logger.info("Updated serving %s on %s", serving_id, serving.get("day"))
+        return serving
+
     # ------------------------------------------------------------------
     # Diary: get diary entries
     # ------------------------------------------------------------------
