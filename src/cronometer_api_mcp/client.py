@@ -128,6 +128,20 @@ _RECIPE_RESULT_TYPE = "recipe"
 _IMPORT_COMPLETE_PROGRESS = 100
 
 
+# Profile prefs holding the fixed-gram macro targets (each has a `.max` twin).
+FIXED_TARGET_PREFS = {
+    "protein_g": "targets.fixed.protein",
+    "fat_g": "targets.fixed.fats",
+    "net_carbs_g": "targets.fixed.net.carbs",
+}
+
+# The same macros also live as per-nutrient target rows (get_targets /
+# edit_target), which is what the app shows next to the diary totals. The two
+# stores are independent, so set_macro_targets writes both.
+TARGET_ROW_IDS = {"protein_g": 203, "fat_g": 204, "net_carbs_g": -1205}
+SODIUM_ID = 307
+
+
 class CronometerError(Exception):
     """Raised when a Cronometer API call fails."""
 
@@ -1860,6 +1874,187 @@ class CronometerClient:
         data = self._request("/api/v2/get_macro_target_templates", payload)
         logger.info("Fetched macro target templates")
         return data
+
+    def _get_prefs(self) -> dict:
+        """Profile prefs as one flat dict (the API returns one-key objects)."""
+        profile = self._request("/api/v2/get_profile", {"config": {"call_version": 1}})
+        prefs: dict = {}
+        for item in profile.get("prefs") or []:
+            if isinstance(item, dict):
+                prefs.update(item)
+        return prefs
+
+    def get_target_rows(self) -> dict[int, dict]:
+        """Per-nutrient target rows keyed by nutrient id (/api/v2/get_targets).
+
+        Each row is {"id", "min", "max", "vis", "custom"}.
+        """
+        data = self._request("/api/v2/get_targets", {"config": {"call_version": 1}})
+        return {row["id"]: row for row in data.get("targets") or [] if "id" in row}
+
+    def _edit_target_row(self, current: dict, nutrient_id: int, **changes) -> dict:
+        """Write one target row with /api/v2/edit_target.
+
+        edit_target replaces the whole row (a field left out is cleared), so
+        the current row is merged first. The write field for `custom` is `cus`.
+        """
+        body = {
+            "id": nutrient_id,
+            "min": current.get("min"),
+            "max": current.get("max"),
+            "vis": current.get("vis", True),
+            "cus": current.get("custom", False),
+        }
+        body.update(changes)
+        data = self._request("/api/v2/edit_target", dict(body))
+        if data.get("result") != "SUCCESS":
+            raise CronometerError(f"edit_target {nutrient_id} failed: {data}")
+        return body
+
+    def get_fixed_macro_targets(self) -> dict:
+        """Macro targets, weight goal and sodium target.
+
+        Gram targets come from profile prefs (what the diary summary and
+        energy target use); `rows` shows the per-nutrient target rows the app
+        displays next to the diary totals, which set_macro_targets keeps equal.
+        The daily energy target is not stored: Cronometer derives it from BMR,
+        activity and `weightGoal` (weight change per week, negative to lose),
+        so the weight goal is how the calorie target moves.
+        """
+        prefs = self._get_prefs()
+
+        def num(key: str) -> float | None:
+            val = prefs.get(key)
+            try:
+                return float(val) if val is not None else None
+            except TypeError, ValueError:
+                return None
+
+        out = {name: num(key) for name, key in FIXED_TARGET_PREFS.items()}
+        out["weight_goal_per_week"] = num("weightGoal")
+        out["weight_unit"] = prefs.get("weightUnit")
+        rows = self.get_target_rows()
+        sodium = rows.get(SODIUM_ID) or {}
+        out["sodium_mg_min"] = sodium.get("min")
+        out["sodium_mg_max"] = sodium.get("max")
+        out["rows"] = {
+            name: {
+                "min": rows.get(nid, {}).get("min"),
+                "max": rows.get(nid, {}).get("max"),
+            }
+            for name, nid in TARGET_ROW_IDS.items()
+        }
+        return out
+
+    def set_macro_targets(
+        self,
+        protein_g: float | None = None,
+        fat_g: float | None = None,
+        net_carbs_g: float | None = None,
+        weight_goal_per_week: float | None = None,
+        sodium_mg_min: float | None = None,
+        sodium_mg_max: float | None = None,
+    ) -> dict:
+        """Set macro targets in grams, the weekly weight goal and/or sodium.
+
+        Gram targets are written to both stores the app keeps: the profile
+        prefs (/api/v2/set_pref, value plus its `.max` twin) and the
+        per-nutrient target row (/api/v2/edit_target, min = max = value,
+        marked custom). Sodium is a target row only. Only the arguments passed
+        change; a one-sided sodium change keeps the other bound. Everything is
+        validated before any call, and both stores are read back; raises if a
+        value did not stick.
+        """
+        grams = {"protein_g": protein_g, "fat_g": fat_g, "net_carbs_g": net_carbs_g}
+        for name, val in grams.items():
+            if val is not None and not 0 <= val <= 1000:
+                raise CronometerError(f"{name} must be between 0 and 1000, got {val}")
+        if weight_goal_per_week is not None and not -2 <= weight_goal_per_week <= 2:
+            raise CronometerError(
+                f"weight_goal_per_week must be between -2 and 2, got {weight_goal_per_week}"
+            )
+        for name, val in (
+            ("sodium_mg_min", sodium_mg_min),
+            ("sodium_mg_max", sodium_mg_max),
+        ):
+            if val is not None and not 0 <= val <= 20000:
+                raise CronometerError(f"{name} must be between 0 and 20000, got {val}")
+        if (
+            sodium_mg_min is not None
+            and sodium_mg_max is not None
+            and sodium_mg_min > sodium_mg_max
+        ):
+            raise CronometerError("sodium_mg_min must not be above sodium_mg_max")
+
+        writes: dict[str, str] = {}
+        for name, val in grams.items():
+            if val is not None:
+                key = FIXED_TARGET_PREFS[name]
+                writes[key] = f"{float(val):.1f}"
+                writes[key + ".max"] = f"{float(val):.1f}"
+        if weight_goal_per_week is not None:
+            writes["weightGoal"] = f"{float(weight_goal_per_week):.1f}"
+        row_changes = {
+            TARGET_ROW_IDS[name]: {"min": float(v), "max": float(v), "cus": True}
+            for name, v in grams.items()
+            if v is not None
+        }
+        touch_sodium = sodium_mg_min is not None or sodium_mg_max is not None
+        if not writes and not touch_sodium:
+            raise CronometerError("Pass at least one target to change")
+
+        # 1) profile prefs
+        for key, val in writes.items():
+            data = self._request(
+                "/api/v2/set_pref",
+                {"key": key, "val": val, "config": {"call_version": 1}},
+            )
+            if data.get("result") != "SUCCESS":
+                raise CronometerError(f"set_pref {key} failed: {data}")
+        if writes:
+            prefs = self._get_prefs()
+            wrong = {
+                k: prefs.get(k) for k, v in writes.items() if str(prefs.get(k)) != v
+            }
+            if wrong:
+                raise CronometerError(f"Targets did not read back as written: {wrong}")
+
+        # 2) per-nutrient target rows
+        if row_changes or touch_sodium:
+            rows = self.get_target_rows()
+            if touch_sodium:
+                cur = rows.get(SODIUM_ID) or {}
+                lo = (
+                    float(sodium_mg_min)
+                    if sodium_mg_min is not None
+                    else cur.get("min")
+                )
+                hi = (
+                    float(sodium_mg_max)
+                    if sodium_mg_max is not None
+                    else cur.get("max")
+                )
+                if lo is not None and hi is not None and lo > hi:
+                    raise CronometerError(
+                        f"sodium min {lo} would be above max {hi}; pass both bounds"
+                    )
+                row_changes[SODIUM_ID] = {"min": lo, "max": hi, "cus": True}
+            for nid, changes in row_changes.items():
+                self._edit_target_row(rows.get(nid) or {}, nid, **changes)
+            after = self.get_target_rows()
+            wrong_rows = {
+                nid: after.get(nid)
+                for nid, ch in row_changes.items()
+                if (after.get(nid) or {}).get("min") != ch["min"]
+                or (after.get(nid) or {}).get("max") != ch["max"]
+            }
+            if wrong_rows:
+                raise CronometerError(
+                    f"Target rows did not read back as written: {wrong_rows}"
+                )
+
+        logger.info("Set macro targets: prefs=%s rows=%s", writes, row_changes)
+        return self.get_fixed_macro_targets()
 
     # ------------------------------------------------------------------
     # Fasting

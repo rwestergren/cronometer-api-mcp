@@ -146,7 +146,8 @@ cached session, so it also overrides a stale cached timezone.
 
 | Tool | Description |
 |------|-------------|
-| `get_macro_targets` | Weekly macro schedule and saved target templates |
+| `get_macro_targets` | Fixed-gram macro targets, weight goal, weekly macro schedule and saved target templates |
+| `set_macro_targets` | Set protein / fat / net-carb targets in grams, the weekly weight goal (which moves the calorie target) and the sodium range; writes both the profile prefs and the per-nutrient target rows |
 | `get_fasting_history` | Fasting history within a date range |
 | `get_fasting_stats` | Aggregate fasting statistics |
 | `list_biometrics` | List trackable biometric metrics and their units |
