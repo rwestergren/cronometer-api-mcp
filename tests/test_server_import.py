@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "remove_food_entry",
     "search_activities",
     "search_foods",
+    "set_macro_split",
     "update_custom_food",
     "update_note",
 }

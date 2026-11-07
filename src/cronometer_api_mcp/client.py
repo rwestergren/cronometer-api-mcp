@@ -28,6 +28,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from .barcode import normalize_barcodes
+from .macro import (
+    MACRO_SPLIT_PREFS,
+    macro_percentages,
+    macro_ratios,
+    validate_macro_split,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +163,8 @@ class CronometerClient:
 
     Thread safety: one instance is shared across MCP tool calls, which the SDK
     dispatches on worker threads. Auth state transitions are serialized (see
-    `_auth_lock`), and edits to a given custom food are serialized per food id
-    (see `_food_lock`); everything else runs concurrently.
+    `_auth_lock`), edits to a given custom food are serialized per food id
+    (see `_food_lock`), and macro split reads/writes share `_macro_split_lock`.
     """
 
     def __init__(self, *, session_path: Path | None = None) -> None:
@@ -177,6 +183,7 @@ class CronometerClient:
         # entire object. `_food_locks_guard` protects the lock registry.
         self._food_locks: dict[int, threading.Lock] = {}
         self._food_locks_guard = threading.Lock()
+        self._macro_split_lock = threading.Lock()
 
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
@@ -2021,6 +2028,93 @@ class CronometerClient:
         data = self._request("/api/v2/get_macro_target_templates", payload)
         logger.info("Fetched macro target templates")
         return data
+
+    def _get_profile_prefs(self) -> dict:
+        profile = self._request("/api/v2/get_profile", {"config": {"call_version": 1}})
+        prefs: dict = {}
+        for pref in profile.get("prefs") or []:
+            prefs.update(pref)
+        return prefs
+
+    def get_macro_split(self) -> dict:
+        """Saved macro ratios as percentages of energy.
+
+        All shares are None when the total is unknown or zero. These ratios
+        are inactive when the account uses fixed targets or the keto calculator.
+        """
+        with self._macro_split_lock:
+            return macro_percentages(macro_ratios(self._get_profile_prefs()))
+
+    def _set_macro_pref(self, key: str, value: str | float) -> None:
+        payload = {
+            "key": key,
+            "val": str(value),
+            "config": {"call_version": 1},
+        }
+        data = self._request("/api/v2/set_pref", payload)
+        if data.get("result") != "SUCCESS":
+            raise CronometerError(f"Failed to set {key}: {data}")
+
+    def _restore_macro_split(self, original: dict, attempted: list[str]) -> str:
+        issues = []
+        for key in attempted:
+            if original.get(key) is None:
+                issues.append(f"cannot restore unset {key}")
+                continue
+            try:
+                self._set_macro_pref(key, original[key])
+            except Exception as exc:
+                issues.append(f"restoring {key} failed: {exc}")
+        details = f" Recovery issues: {'; '.join(issues)}." if issues else ""
+        try:
+            current = macro_ratios(self._get_profile_prefs())
+            restored = current == macro_ratios(original)
+            percentages = macro_percentages(current)
+        except Exception as exc:
+            return (
+                "Current macro split is unknown; changes may remain "
+                f"(readback failed: {exc}).{details}"
+            )
+        outcome = (
+            "Previous macro split restored."
+            if restored
+            else "Partial macro update remains."
+        )
+        return (
+            f"{outcome} Current raw ratios: {json.dumps(current)}; "
+            f"current split (%): {json.dumps(percentages)}.{details}"
+        )
+
+    def set_macro_split(self, protein: float, carbs: float, fat: float) -> dict:
+        """Set the macro split, in percent of energy.
+
+        Requires ratio mode and shares totaling 100. Writes one preference
+        per macro; on failure, attempts restoration and reports the readback.
+        Returns the split as written on success.
+        """
+        split = {"protein": protein, "carbs": carbs, "fat": fat}
+        validate_macro_split(split)
+        with self._macro_split_lock:
+            original = self._get_profile_prefs()
+            if original.get("macroIndex") not in (6, "6"):
+                raise CronometerError(
+                    "Macro split requires Macro Ratios mode. Select Ratios in "
+                    "Cronometer's Macro & Energy Targets before retrying; "
+                    "no preferences were changed."
+                )
+            attempted = []
+            for name, key in MACRO_SPLIT_PREFS.items():
+                # A timeout can occur after the server commits the preference.
+                attempted.append(key)
+                try:
+                    self._set_macro_pref(key, float(split[name]))
+                except Exception as exc:
+                    outcome = self._restore_macro_split(original, attempted)
+                    raise CronometerError(
+                        f"Failed to set {key} ({type(exc).__name__}: {exc}). {outcome}"
+                    ) from exc
+        logger.info("Set macro split to %s", split)
+        return split
 
     # ------------------------------------------------------------------
     # Fasting

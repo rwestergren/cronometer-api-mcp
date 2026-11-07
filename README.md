@@ -151,7 +151,8 @@ cached session, so it also overrides a stale cached timezone.
 |------|-------------|
 | `search_activities` | Find activities to log as exercise, by name |
 | `add_exercise` | Log an exercise with its duration and calories burned |
-| `get_macro_targets` | Weekly macro schedule and saved target templates |
+| `get_macro_targets` | Macro split (percent of energy), weekly macro schedule and saved target templates |
+| `set_macro_split` | Set the protein / carbs / fat split in percent of energy |
 | `get_fasting_history` | Fasting history within a date range |
 | `get_fasting_stats` | Aggregate fasting statistics |
 | `list_biometrics` | List trackable biometric metrics and their units |

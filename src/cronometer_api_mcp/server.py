@@ -973,8 +973,11 @@ def import_recipe(ingredients: str, name: str | None = None) -> str:
 def get_macro_targets() -> str:
     """Get current macro targets including weekly schedule and templates.
 
-    Returns the weekly macro schedule (which template applies to each day)
-    and all saved macro target templates with their values.
+    Returns the macro split (percent of energy for protein, carbs and fat),
+    the weekly macro schedule (which template applies to each day) and all
+    saved macro target templates with their values. The split describes saved
+    ratios, which are inactive in fixed-target or keto mode; shares are null
+    when the ratio total is unknown or zero.
     """
     try:
         client = _get_client()
@@ -982,10 +985,34 @@ def get_macro_targets() -> str:
         templates = client.get_macro_target_templates()
         return _ok(
             {
+                "macro_split": client.get_macro_split(),
                 "schedules": schedules,
                 "templates": templates,
             }
         )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def set_macro_split(protein: float, carbs: float, fat: float) -> str:
+    """Set how the energy target is split between protein, carbs and fat.
+
+    This changes the user's real targets: confirm the numbers with the user
+    first, and read the current split with get_macro_targets so it can be
+    put back. Values are percent of energy and must add up to 100.
+    Requires Macro Ratios mode; fixed-target and keto modes are rejected.
+    Failed writes attempt restoration and report the resulting state, which
+    may remain partially changed or unknown if recovery fails.
+
+    Args:
+        protein: Protein share in percent (e.g. 30).
+        carbs: Carbohydrate share in percent (e.g. 40).
+        fat: Fat share in percent (e.g. 30).
+    """
+    try:
+        client = _get_client()
+        return _ok({"macro_split": client.set_macro_split(protein, carbs, fat)})
     except Exception as e:
         return _err(e)
 
