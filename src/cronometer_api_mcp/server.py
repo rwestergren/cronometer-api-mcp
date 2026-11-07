@@ -929,8 +929,60 @@ def get_macro_targets() -> str:
         templates = client.get_macro_target_templates()
         return _ok(
             {
+                "fixed_targets": client.get_fixed_macro_targets(),
                 "schedules": schedules,
                 "templates": templates,
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def set_macro_targets(
+    protein_g: float | None = None,
+    fat_g: float | None = None,
+    net_carbs_g: float | None = None,
+    weight_goal_per_week: float | None = None,
+    sodium_mg_min: float | None = None,
+    sodium_mg_max: float | None = None,
+) -> str:
+    """Set the daily macro targets in grams, the weekly weight goal and/or sodium.
+
+    Confirm the new values with the user first, and read the current ones
+    with get_macro_targets so they can be put back. Only the arguments you
+    pass change.
+
+    The calorie target cannot be set directly: Cronometer computes it from
+    BMR, activity level and the weight goal. Move it with
+    weight_goal_per_week (in the account's weight unit per week, negative to
+    lose; each 1 lb/week is about 500 kcal/day). Check the result with
+    get_food_log's energy_summary.total_target_kcal.
+
+    Args:
+        protein_g: Daily protein target in grams.
+        fat_g: Daily fat target in grams.
+        net_carbs_g: Daily net-carb target in grams.
+        weight_goal_per_week: Weight change per week, -2 to 2 (e.g. -1.5).
+        sodium_mg_min: Daily sodium target (lower bound) in mg.
+        sodium_mg_max: Daily sodium upper limit in mg.
+
+    Gram targets are written to both places the app keeps them (profile
+    prefs and the per-nutrient target rows), so the diary summary and the
+    target bars agree.
+    """
+    try:
+        client = _get_client()
+        return _ok(
+            {
+                "fixed_targets": client.set_macro_targets(
+                    protein_g=protein_g,
+                    fat_g=fat_g,
+                    net_carbs_g=net_carbs_g,
+                    weight_goal_per_week=weight_goal_per_week,
+                    sodium_mg_min=sodium_mg_min,
+                    sodium_mg_max=sodium_mg_max,
+                )
             }
         )
     except Exception as e:
