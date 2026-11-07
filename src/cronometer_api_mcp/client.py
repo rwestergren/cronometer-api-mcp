@@ -28,6 +28,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from .barcode import normalize_barcodes
+from .macro import (
+    MACRO_SPLIT_PREFS,
+    macro_percentages,
+    macro_ratios,
+    validate_macro_split,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2037,7 +2043,7 @@ class CronometerClient:
         are inactive when the account uses fixed targets or the keto calculator.
         """
         with self._macro_split_lock:
-            return _macro_percentages(_macro_ratios(self._get_profile_prefs()))
+            return macro_percentages(macro_ratios(self._get_profile_prefs()))
 
     def _set_macro_pref(self, key: str, value: str | float) -> None:
         payload = {
@@ -2061,9 +2067,9 @@ class CronometerClient:
                 issues.append(f"restoring {key} failed: {exc}")
         details = f" Recovery issues: {'; '.join(issues)}." if issues else ""
         try:
-            current = _macro_ratios(self._get_profile_prefs())
-            restored = current == _macro_ratios(original)
-            percentages = _macro_percentages(current)
+            current = macro_ratios(self._get_profile_prefs())
+            restored = current == macro_ratios(original)
+            percentages = macro_percentages(current)
         except Exception as exc:
             return (
                 "Current macro split is unknown; changes may remain "
@@ -2087,13 +2093,7 @@ class CronometerClient:
         Returns the split as written on success.
         """
         split = {"protein": protein, "carbs": carbs, "fat": fat}
-        for name, value in split.items():
-            if not math.isfinite(value) or not 0 <= value <= 100:
-                raise ValueError(f"{name} must be between 0 and 100, got {value}")
-        if abs(sum(split.values()) - 100) > 0.01:
-            raise ValueError(
-                f"protein, carbs and fat must add up to 100, got {sum(split.values())}"
-            )
+        validate_macro_split(split)
         with self._macro_split_lock:
             original = self._get_profile_prefs()
             if original.get("macroIndex") not in (6, "6"):
@@ -2103,7 +2103,7 @@ class CronometerClient:
                     "no preferences were changed."
                 )
             attempted = []
-            for name, key in _MACRO_SPLIT_PREFS.items():
+            for name, key in MACRO_SPLIT_PREFS.items():
                 # A timeout can occur after the server commits the preference.
                 attempted.append(key)
                 try:
@@ -2448,31 +2448,6 @@ def _v3_diary_entry(entry: dict) -> dict:
     if isinstance(out.get("meta"), dict):
         out["meta"] = json.dumps(out["meta"], separators=(",", ":"))
     return out
-
-
-# Profile prefs holding energy ratios, not necessarily totaling 100.
-_MACRO_SPLIT_PREFS = {
-    "protein": "macroProtein",
-    "carbs": "macroCarbs",
-    "fat": "macroLipids",
-}
-
-
-def _macro_ratios(prefs: dict) -> dict:
-    return {
-        name: float(prefs[key]) if prefs.get(key) is not None else None
-        for name, key in _MACRO_SPLIT_PREFS.items()
-    }
-
-
-def _macro_percentages(ratios: dict) -> dict:
-    unknown = dict.fromkeys(ratios)
-    if any(v is None or not math.isfinite(v) or v < 0 for v in ratios.values()):
-        return unknown
-    total = sum(ratios.values())
-    if not total or not math.isfinite(total):
-        return unknown
-    return {name: value / total * 100 for name, value in ratios.items()}
 
 
 def _meal_group_for_hour(hour: int) -> int:
