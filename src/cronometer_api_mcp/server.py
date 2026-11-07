@@ -324,12 +324,14 @@ def remove_food_entry(
     entry_ids: list[str],
     date: str | None = None,
 ) -> str:
-    """Remove one or more food entries from the Cronometer diary.
+    """Remove one or more entries from the Cronometer diary.
 
-    Use get_food_log to find entry IDs.
+    Works for every entry type in get_food_log's diary: foods (servingId),
+    exercises (exerciseId), notes (noteId) and biometrics such as a weight
+    (biometricId).
 
     Args:
-        entry_ids: List of serving/entry IDs to remove.
+        entry_ids: List of entry IDs to remove.
         date: Date the entries belong to as YYYY-MM-DD (defaults to today).
     """
     try:
