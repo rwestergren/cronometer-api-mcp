@@ -767,6 +767,31 @@ def delete_custom_food(food_id: int) -> str:
         return _err(e)
 
 
+@mcp.tool(annotations=_DESTRUCTIVE)
+def delete_recipe(food_id: int, permanent: bool = False) -> str:
+    """Delete a recipe or saved meal that you created.
+
+    By default the recipe is retired, as the app does for a recipe that has
+    been logged: it disappears from search and from the recipe and meal
+    lists, and diary entries that already use it are kept.
+
+    permanent=True deletes it outright. This ALSO REMOVES THE DIARY ENTRIES
+    that logged it. Use it only for a recipe that was never logged, or when
+    the user has explicitly asked for those entries to go.
+
+    Plain custom foods are not accepted; use delete_custom_food for those.
+
+    Args:
+        food_id: ID of the recipe or meal to delete.
+        permanent: Delete outright instead of retiring (see above).
+    """
+    try:
+        client = _get_client()
+        return _ok(client.delete_recipe(food_id, permanent=permanent))
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Recipe creation
 # ------------------------------------------------------------------
