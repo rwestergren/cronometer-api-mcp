@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
     "remove_food_entry",
     "search_foods",
     "update_custom_food",
+    "update_recipe",
 }
 
 
