@@ -8,8 +8,10 @@ from search and the Custom Foods list. delete_recipe uses the app's own
 
 from __future__ import annotations
 
+import json
 import threading
 
+import httpx
 import pytest
 from test_client import make_cold_client
 
@@ -535,6 +537,48 @@ def test_delete_recipe_accepts_saved_meals(tmp_path):
     client, _ = make_cold_client(tmp_path, [recipe(meal=True), DELETED])
 
     assert client.delete_recipe(FOOD_ID)["meal"] is True
+
+
+@pytest.mark.parametrize("failure", ["timeout", "api_error"])
+def test_delete_recipe_cleanup_failure_preserves_tool_success(
+    tmp_path, monkeypatch, failure
+):
+    from cronometer_api_mcp import server
+
+    client, _ = make_cold_client(
+        tmp_path, [recipe(), DELETED, {"result": "FAIL", "error": "cleanup failed"}]
+    )
+    real_post = client._http.post
+    endpoints = []
+
+    def post(endpoint, json=None):
+        endpoints.append(endpoint)
+        if endpoint == "/api/v2/delete_recent_foods" and failure == "timeout":
+            raise httpx.ReadTimeout("Cleanup timed out")
+        return real_post(endpoint, json=json)
+
+    monkeypatch.setattr(client._http, "post", post)
+    monkeypatch.setattr(server, "_get_client", lambda: client)
+
+    result = json.loads(server.delete_recipe(FOOD_ID, permanent=True))
+
+    assert result == {
+        "status": "success",
+        "food_id": FOOD_ID,
+        "name": "Test Recipe",
+        "meal": False,
+        "permanent": True,
+        "warning": (
+            "Recipe was permanently deleted, but its recent-foods "
+            "entry could not be cleared."
+        ),
+    }
+    assert endpoints[:3] == [
+        "/api/v2/get_food",
+        "/api/v2/del_food",
+        "/api/v2/delete_recent_foods",
+    ]
+    assert endpoints.count("/api/v2/del_food") == 1
 
 
 @pytest.mark.parametrize(

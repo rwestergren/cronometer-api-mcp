@@ -1019,7 +1019,8 @@ class CronometerClient:
 
         Plain custom foods are refused here; retire_custom_food handles them.
 
-        Returns {"food_id": int, "name": str, "meal": bool, "permanent": bool}.
+        Returns {"food_id": int, "name": str, "meal": bool, "permanent": bool},
+        with a warning if deletion succeeded but recent-foods cleanup failed.
         """
         with self._food_lock(food_id):
             food = self.get_food(food_id)
@@ -1034,23 +1035,35 @@ class CronometerClient:
             data = self._request("/api/v2/del_food", payload)
             if data.get("result") != "SUCCESS":
                 raise CronometerError(f"Failed to delete recipe {food_id}: {data}")
+            result = {
+                "food_id": food_id,
+                "name": food.get("name"),
+                "meal": bool(food.get("meal")),
+                "permanent": permanent,
+            }
             if permanent:
-                self._request(
-                    "/api/v2/delete_recent_foods",
-                    {"servingFoodIds": [food_id], "config": {"call_version": 2}},
-                )
+                try:
+                    self._request(
+                        "/api/v2/delete_recent_foods",
+                        {"servingFoodIds": [food_id], "config": {"call_version": 2}},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Recipe %d deleted, but recent-foods cleanup failed: %s",
+                        food_id,
+                        exc,
+                    )
+                    result["warning"] = (
+                        "Recipe was permanently deleted, but its recent-foods "
+                        "entry could not be cleared."
+                    )
         logger.info(
             "%s recipe %r (id=%d)",
             "Deleted" if permanent else "Retired",
             food.get("name"),
             food_id,
         )
-        return {
-            "food_id": food_id,
-            "name": food.get("name"),
-            "meal": bool(food.get("meal")),
-            "permanent": permanent,
-        }
+        return result
 
     # ------------------------------------------------------------------
     # Recipe creation
