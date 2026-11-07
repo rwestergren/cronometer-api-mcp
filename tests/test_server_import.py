@@ -14,6 +14,7 @@ import threading
 EXPECTED_TOOLS = {
     "add_biometric",
     "add_custom_food",
+    "add_exercise",
     "add_food_entry",
     "add_note",
     "add_recipe",
@@ -32,6 +33,7 @@ EXPECTED_TOOLS = {
     "list_biometrics",
     "mark_day_complete",
     "remove_food_entry",
+    "search_activities",
     "search_foods",
     "update_custom_food",
     "update_note",
