@@ -1861,6 +1861,54 @@ class CronometerClient:
         logger.info("Fetched macro target templates")
         return data
 
+    def get_macro_split(self) -> dict:
+        """The macro split (percent of energy) from the profile's prefs.
+
+        The app keeps it as three user prefs, macroProtein, macroCarbs and
+        macroLipids, read back through /api/v2/get_profile. Prefs come as a
+        list of one-key objects.
+
+        Returns {"protein": float, "carbs": float, "fat": float}; a share
+        that was never set is None.
+        """
+        profile = self._request("/api/v2/get_profile", {"config": {"call_version": 1}})
+        prefs: dict = {}
+        for pref in profile.get("prefs") or []:
+            prefs.update(pref)
+        return {
+            name: float(prefs[key]) if prefs.get(key) is not None else None
+            for name, key in _MACRO_SPLIT_PREFS.items()
+        }
+
+    def set_macro_split(self, protein: float, carbs: float, fat: float) -> dict:
+        """Set the macro split, in percent of energy.
+
+        Writes the three prefs with /api/v2/set_pref, one call per macro, as
+        the app does (it sends only the ones that changed; all three are
+        sent here so the result is exact). The shares must add up to 100.
+
+        Returns the split as written.
+        """
+        split = {"protein": protein, "carbs": carbs, "fat": fat}
+        for name, value in split.items():
+            if not math.isfinite(value) or not 0 <= value <= 100:
+                raise ValueError(f"{name} must be between 0 and 100, got {value}")
+        if abs(sum(split.values()) - 100) > 0.01:
+            raise ValueError(
+                f"protein, carbs and fat must add up to 100, got {sum(split.values())}"
+            )
+        for name, key in _MACRO_SPLIT_PREFS.items():
+            payload = {
+                "key": key,
+                "val": str(float(split[name])),
+                "config": {"call_version": 1},
+            }
+            data = self._request("/api/v2/set_pref", payload)
+            if data.get("result") != "SUCCESS":
+                raise CronometerError(f"Failed to set {key}: {data}")
+        logger.info("Set macro split to %s", split)
+        return split
+
     # ------------------------------------------------------------------
     # Fasting
     # ------------------------------------------------------------------
@@ -1989,6 +2037,14 @@ def _translation_id(food: dict) -> int:
         if isinstance(first, dict):
             return first.get("translationId") or 0
     return 0
+
+
+# Profile prefs holding the macro split, in percent of energy.
+_MACRO_SPLIT_PREFS = {
+    "protein": "macroProtein",
+    "carbs": "macroCarbs",
+    "fat": "macroLipids",
+}
 
 
 def _meal_group_for_hour(hour: int) -> int:
