@@ -324,12 +324,14 @@ def remove_food_entry(
     entry_ids: list[str],
     date: str | None = None,
 ) -> str:
-    """Remove one or more food entries from the Cronometer diary.
+    """Remove one or more entries from the Cronometer diary.
 
-    Use get_food_log to find entry IDs.
+    Works for every entry type in get_food_log's diary: foods (servingId),
+    exercises (exerciseId), notes (noteId) and biometrics such as a weight
+    (biometricId).
 
     Args:
-        entry_ids: List of serving/entry IDs to remove.
+        entry_ids: List of entry IDs to remove.
         date: Date the entries belong to as YYYY-MM-DD (defaults to today).
     """
     try:
@@ -343,6 +345,57 @@ def remove_food_entry(
                 "date": date or str(date_module_today()),
             }
         )
+    except Exception as e:
+        return _err(e)
+
+
+# ------------------------------------------------------------------
+# Diary: notes
+# ------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_WRITE)
+def add_note(text: str, date: str | None = None, diary_group: str = "auto") -> str:
+    """Add a note to a diary day.
+
+    Notes show up in get_food_log's diary as entries of type "Note". Remove
+    one with remove_food_entry and its noteId.
+
+    Args:
+        text: The note text.
+        date: Date as YYYY-MM-DD (defaults to today).
+        diary_group: Meal slot the note sits in -- one of "auto",
+            "breakfast", "lunch", "dinner", "snacks" (default "auto").
+    """
+    try:
+        groups = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
+        group_int = groups.get(diary_group.strip().lower())
+        if group_int is None:
+            return _err(
+                ValueError(
+                    f"Invalid diary_group '{diary_group}'. "
+                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
+                )
+            )
+        client = _get_client()
+        note = client.add_note(text, _parse_date(date), group_int)
+        return _ok({"note": note})
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def update_note(note_id: int, text: str, date: str | None = None) -> str:
+    """Replace the text of a diary note.
+
+    Args:
+        note_id: noteId of the note, from get_food_log.
+        text: The new note text.
+        date: Date the note is on as YYYY-MM-DD (defaults to today).
+    """
+    try:
+        client = _get_client()
+        return _ok({"note": client.update_note(note_id, text, _parse_date(date))})
     except Exception as e:
         return _err(e)
 
@@ -767,6 +820,31 @@ def delete_custom_food(food_id: int) -> str:
         return _err(e)
 
 
+@mcp.tool(annotations=_DESTRUCTIVE)
+def delete_recipe(food_id: int, permanent: bool = False) -> str:
+    """Delete a recipe or saved meal that you created.
+
+    By default the recipe is retired, as the app does for a recipe that has
+    been logged: it disappears from search and from the recipe and meal
+    lists, and diary entries that already use it are kept.
+
+    permanent=True deletes it outright. This ALSO REMOVES THE DIARY ENTRIES
+    that logged it. Use it only for a recipe that was never logged, or when
+    the user has explicitly asked for those entries to go.
+
+    Plain custom foods are not accepted; use delete_custom_food for those.
+
+    Args:
+        food_id: ID of the recipe or meal to delete.
+        permanent: Delete outright instead of retiring (see above).
+    """
+    try:
+        client = _get_client()
+        return _ok(client.delete_recipe(food_id, permanent=permanent))
+    except Exception as e:
+        return _err(e)
+
+
 # ------------------------------------------------------------------
 # Recipe creation
 # ------------------------------------------------------------------
@@ -1039,6 +1117,35 @@ def get_biometrics(
                 "biometrics": data,
             }
         )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_WRITE)
+def add_biometric(
+    metric_id: int,
+    unit_id: int,
+    amount: float,
+    date: str | None = None,
+) -> str:
+    """Record a biometric reading such as a weight or body fat.
+
+    Use list_biometrics for metric_id and unit_id (e.g. Weight is metric_id 1
+    with unit_id 1 for kg; Body Fat is metric_id 8 with unit_id 13 for %).
+    The reading appears in get_food_log's diary as a "Biometric" entry;
+    remove_food_entry with its biometricId deletes it.
+
+    Args:
+        metric_id: Numeric metric ID from list_biometrics.
+        unit_id: Numeric unit ID from the metric's units; the amount is in
+            this unit.
+        amount: The reading.
+        date: Date as YYYY-MM-DD (defaults to today).
+    """
+    try:
+        client = _get_client()
+        result = client.add_biometric(metric_id, unit_id, amount, _parse_date(date))
+        return _ok({"biometric": result})
     except Exception as e:
         return _err(e)
 

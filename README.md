@@ -133,14 +133,17 @@ cached session, so it also overrides a stale cached timezone.
 | Tool | Description |
 |------|-------------|
 | `add_food_entry` | Log a food serving to the diary |
-| `remove_food_entry` | Remove one or more diary entries |
+| `remove_food_entry` | Remove one or more diary entries: foods, exercises, notes or biometrics |
 | `add_custom_food` | Create a custom food with specified nutrition and optional barcodes |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, serving size, or barcodes |
 | `delete_custom_food` | Retire a custom food so it leaves search and the Custom Foods list (existing diary entries are kept) |
+| `delete_recipe` | Delete a recipe or saved meal: retired by default (diary entries are kept), or permanently, which also removes the diary entries that logged it |
 | `add_recipe` | Create a recipe from existing foods referenced by ID and gram weight |
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
+| `add_note` | Add a note to a diary day |
+| `update_note` | Replace the text of a diary note |
 
 ### Targets & Tracking
 
@@ -153,6 +156,7 @@ cached session, so it also overrides a stale cached timezone.
 | `get_fasting_stats` | Aggregate fasting statistics |
 | `list_biometrics` | List trackable biometric metrics and their units |
 | `get_biometrics` | Biometric time series (e.g. weight, body fat) within a date range |
+| `add_biometric` | Record a biometric reading such as a weight or body fat |
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 

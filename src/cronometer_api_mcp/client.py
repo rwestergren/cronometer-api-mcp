@@ -992,9 +992,7 @@ class CronometerClient:
 
         Sets `retired` on the food and saves it. A retired food drops out of
         search and the Custom Foods list but stays readable by id and keeps
-        existing diary entries intact. The app's own delete removes the food
-        outright through an endpoint this client doesn't know; retiring is the
-        closest the known API offers, and it is idempotent.
+        existing diary entries intact. It is idempotent.
 
         Returns {"food_id": int, "name": str, "retired": True}.
         """
@@ -1004,6 +1002,68 @@ class CronometerClient:
             self._save_custom_food(food)
         logger.info("Retired custom food %r (id=%d)", food.get("name"), food_id)
         return {"food_id": food_id, "name": food.get("name"), "retired": True}
+
+    def delete_recipe(self, food_id: int, *, permanent: bool = False) -> dict:
+        """Delete a user-created recipe or saved meal.
+
+        Uses /api/v2/del_food, the app's own delete. By default it sends
+        `retire: true`, which is what the app does for a food that is already
+        logged: the recipe leaves search and the My Foods lists, but stays
+        readable by id and every diary entry that uses it is kept.
+
+        With permanent=True the flag is left off and the server deletes the
+        recipe outright. That also removes every diary entry that logged it
+        (verified against the live API), so it is only safe for a recipe that
+        was never logged. The app then drops the id from the recent-foods
+        list via /api/v2/delete_recent_foods; so does this method.
+
+        Plain custom foods are refused here; retire_custom_food handles them.
+
+        Returns {"food_id": int, "name": str, "meal": bool, "permanent": bool},
+        with a warning if deletion succeeded but recent-foods cleanup failed.
+        """
+        with self._food_lock(food_id):
+            food = self.get_food(food_id)
+            if food.get("source") != "Custom" or not food.get("ingredients"):
+                raise CronometerError(
+                    f"Food {food_id} ({food.get('name')!r}) is not a recipe or "
+                    f"meal you created; use delete_custom_food for custom foods"
+                )
+            payload: dict = {"id": food_id, "config": {"call_version": 1}}
+            if not permanent:
+                payload["retire"] = True
+            data = self._request("/api/v2/del_food", payload)
+            if data.get("result") != "SUCCESS":
+                raise CronometerError(f"Failed to delete recipe {food_id}: {data}")
+            result = {
+                "food_id": food_id,
+                "name": food.get("name"),
+                "meal": bool(food.get("meal")),
+                "permanent": permanent,
+            }
+            if permanent:
+                try:
+                    self._request(
+                        "/api/v2/delete_recent_foods",
+                        {"servingFoodIds": [food_id], "config": {"call_version": 2}},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Recipe %d deleted, but recent-foods cleanup failed: %s",
+                        food_id,
+                        exc,
+                    )
+                    result["warning"] = (
+                        "Recipe was permanently deleted, but its recent-foods "
+                        "entry could not be cleared."
+                    )
+        logger.info(
+            "%s recipe %r (id=%d)",
+            "Deleted" if permanent else "Retired",
+            food.get("name"),
+            food_id,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Recipe creation
@@ -1428,6 +1488,103 @@ class CronometerClient:
         return data
 
     # ------------------------------------------------------------------
+    # Diary: notes
+    # ------------------------------------------------------------------
+
+    def add_note(
+        self, text: str, day: date | None = None, diary_group: int = 0
+    ) -> dict:
+        """Add a note to a diary day.
+
+        Args:
+            text: The note text.
+            day: Date to add it to. Defaults to today.
+            diary_group: Meal group the note sits in, as for add_serving:
+                0 = auto (by time of day), 1 = Breakfast, 2 = Lunch,
+                3 = Dinner, 4 = Snacks.
+
+        Returns the stored note: {"noteId", "text", "day", "order", ...}.
+        """
+        if diary_group == 0:
+            diary_group = _meal_group_for_hour(self.now().hour)
+        return self._save_note(0, text, self._format_day(day), (diary_group << 16) | 1)
+
+    def update_note(self, note_id: int, text: str, day: date | None = None) -> dict:
+        """Replace the text of an existing diary note, keeping its place.
+
+        Returns the stored note.
+        """
+        entries = self.get_diary(day).get("diary", [])
+        note = next(
+            (
+                e
+                for e in entries
+                if e.get("type") == "Note" and str(e.get("noteId")) == str(note_id)
+            ),
+            None,
+        )
+        if note is None:
+            raise CronometerError(
+                f"No note {note_id} in the diary for {self._format_day(day)}"
+            )
+        return self._save_note(note["noteId"], text, note["day"], note["order"])
+
+    def _save_note(
+        self,
+        note_id: int,
+        text: str,
+        day_str: str,
+        order: int,
+        *,
+        _retried: bool = False,
+    ) -> dict:
+        """Create (note_id 0) or overwrite a note via /photoupload.
+
+        The app writes notes through its photo upload endpoint: a multipart
+        form, authenticated by the session token in a `sessionKey` field
+        rather than the JSON auth block. Text edits preserve existing photos.
+        """
+        if not text.strip():
+            raise ValueError("note text must not be empty")
+        self._ensure_auth()
+        sent_token = self._token
+        fields = {
+            "action": "diaryImage",
+            "sessionKey": sent_token,
+            "noteId": str(note_id),
+            "day": day_str,
+            "order": str(order),
+            "deleteExistingPhoto": "true" if note_id == 0 else "false",
+            "noteText": text,
+        }
+        form = httpx.Request(
+            "POST", "/", files={k: (None, v) for k, v in fields.items()}
+        )
+        resp = self._http.post(
+            "/photoupload",
+            content=form.read(),
+            headers={"content-type": form.headers["content-type"]},
+        )
+        if resp.status_code in (401, 403) and not _retried:
+            self._reauthenticate(sent_token)
+            return self._save_note(note_id, text, day_str, order, _retried=True)
+
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise CronometerError(f"Failed to save note: {resp.text[:300]}") from None
+        if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
+            if not _retried:
+                self._reauthenticate(sent_token)
+                return self._save_note(note_id, text, day_str, order, _retried=True)
+            raise CronometerError(f"Failed to save note: {data}")
+        if not isinstance(data, dict) or "noteId" not in data:
+            raise CronometerError(f"Failed to save note: {data}")
+        logger.info("Saved note %s on %s", data["noteId"], day_str)
+        return data
+
+    # ------------------------------------------------------------------
     # Diary: get diary entries
     # ------------------------------------------------------------------
 
@@ -1452,28 +1609,33 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     def delete_entries(self, entry_ids: list[str], day: date | None = None) -> dict:
-        """Remove diary entries by their serving IDs.
+        """Remove diary entries by their IDs.
 
-        Fetches the diary for the given day, matches entries by servingId,
-        and sends the full serving objects to the v3 DELETE endpoint.
+        Fetches the diary for the given day, matches entries by their ID --
+        servingId for foods, exerciseId for exercises, noteId for notes,
+        biometricId for biometrics -- and sends them to the v3 DELETE
+        endpoint in the shape the app uses (see _v3_diary_entry).
 
         Uses: DELETE /api/v3/user/{userId}/diary-entries
 
         Args:
-            entry_ids: List of serving IDs to delete (as strings).
+            entry_ids: List of entry IDs to delete (as strings).
             day: The day the entries belong to. Defaults to today.
 
         Returns dict with removed IDs and count.
         """
-        # Fetch the diary to get full serving objects (required by v3 API)
+        # Fetch the diary to get full entry objects (required by v3 API)
         diary_data = self.get_diary(day)
         diary_entries = diary_data.get("diary", [])
 
         id_set = {str(eid) for eid in entry_ids}
         to_delete = []
+        removed_ids = []
         for entry in diary_entries:
-            if str(entry.get("servingId")) in id_set:
-                to_delete.append(entry)
+            entry_id = _diary_entry_id(entry)
+            if entry_id is not None and str(entry_id) in id_set:
+                to_delete.append(_v3_diary_entry(entry))
+                removed_ids.append(str(entry_id))
 
         if not to_delete:
             logger.warning(
@@ -1489,7 +1651,6 @@ class CronometerClient:
         )
 
         if resp.status_code == 204:
-            removed_ids = [str(e["servingId"]) for e in to_delete]
             logger.info(
                 "Deleted %d entries for %s: %s",
                 len(removed_ids),
@@ -1960,6 +2121,65 @@ class CronometerClient:
         )
         return data
 
+    def add_biometric(
+        self,
+        metric_id: int,
+        unit_id: int,
+        amount: float,
+        day: date | None = None,
+    ) -> dict:
+        """Record a biometric value (e.g. a weight or body fat reading).
+
+        Args:
+            metric_id: Metric ID from get_metrics (e.g. 1 for Weight,
+                8 for Body Fat).
+            unit_id: Unit ID from that metric's units (e.g. 1 for kg, 2 for
+                lbs). The value is stored in this unit.
+            amount: The reading.
+            day: Date of the reading. Defaults to today.
+
+        Several readings of one metric can share a day; get_biometrics then
+        reports their average. A reading on an earlier day doesn't change
+        the profile's current weight.
+
+        Uses: POST /api/v2/add_biometric
+
+        Returns {"biometricId": int, "metricId", "unitId", "amount", "day"}.
+        """
+        if not math.isfinite(amount) or amount < 0:
+            raise ValueError(f"amount must be a non-negative number, got {amount}")
+        biometric = {
+            "biometricId": 0,
+            "type": "Biometric",
+            "metricId": metric_id,
+            "unitId": unit_id,
+            "amount": amount,
+            "day": self._format_day(day),
+            "order": 1,
+            "meta": None,
+            "externalId": None,
+            "source": None,
+            "userId": self.user_id,
+        }
+        payload = {"biometric": biometric, "config": {"call_version": 1}}
+        data = self._request("/api/v2/add_biometric", payload)
+        if not data.get("id"):
+            raise CronometerError(f"Failed to add biometric: {data}")
+        logger.info(
+            "Recorded metric %d = %s (unit %d) on %s",
+            metric_id,
+            amount,
+            unit_id,
+            biometric["day"],
+        )
+        return {
+            "biometricId": data["id"],
+            "metricId": metric_id,
+            "unitId": unit_id,
+            "amount": amount,
+            "day": (day or self.today()).isoformat(),
+        }
+
     # ------------------------------------------------------------------
     # Exercise
     # ------------------------------------------------------------------
@@ -2101,6 +2321,39 @@ def _translation_id(food: dict) -> int:
 
 
 _KG_PER_LB = 0.45359237
+
+
+# The id key get_diary uses for each diary entry type.
+_DIARY_ENTRY_ID_KEYS = {
+    "Serving": "servingId",
+    "Exercise": "exerciseId",
+    "Note": "noteId",
+    "Biometric": "biometricId",
+}
+
+
+def _diary_entry_id(entry: dict) -> int | None:
+    """The id of a get_diary entry, whatever its type."""
+    key = _DIARY_ENTRY_ID_KEYS.get(entry.get("type", "Serving"), "servingId")
+    return entry.get(key)
+
+
+def _v3_diary_entry(entry: dict) -> dict:
+    """Reshape a get_diary entry into what the v3 delete accepts.
+
+    Servings and exercises go back as they are. Notes and biometrics are
+    keyed by a plain `id` there (with noteId/biometricId the server answers
+    204 but deletes nothing, or 400). The v3 endpoint also wants `meta` as a
+    JSON string, not the object get_diary returns, or it answers 400 "Not
+    able to deserialize data provided". Both verified against the live API
+    and matching what the app sends.
+    """
+    out = dict(entry)
+    if out.get("type") in ("Note", "Biometric"):
+        out["id"] = out.pop(_DIARY_ENTRY_ID_KEYS[out["type"]])
+    if isinstance(out.get("meta"), dict):
+        out["meta"] = json.dumps(out["meta"], separators=(",", ":"))
+    return out
 
 
 def _meal_group_for_hour(hour: int) -> int:
