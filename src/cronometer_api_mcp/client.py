@@ -1469,24 +1469,32 @@ class CronometerClient:
             )
         return self._save_note(note["noteId"], text, note["day"], note["order"])
 
-    def _save_note(self, note_id: int, text: str, day_str: str, order: int) -> dict:
+    def _save_note(
+        self,
+        note_id: int,
+        text: str,
+        day_str: str,
+        order: int,
+        *,
+        _retried: bool = False,
+    ) -> dict:
         """Create (note_id 0) or overwrite a note via /photoupload.
 
         The app writes notes through its photo upload endpoint: a multipart
         form, authenticated by the session token in a `sessionKey` field
-        rather than the JSON auth block. deleteExistingPhoto is what the app
-        sends for a text-only note.
+        rather than the JSON auth block. Text edits preserve existing photos.
         """
         if not text.strip():
             raise ValueError("note text must not be empty")
         self._ensure_auth()
+        sent_token = self._token
         fields = {
             "action": "diaryImage",
-            "sessionKey": self._token,
+            "sessionKey": sent_token,
             "noteId": str(note_id),
             "day": day_str,
             "order": str(order),
-            "deleteExistingPhoto": "true",
+            "deleteExistingPhoto": "true" if note_id == 0 else "false",
             "noteText": text,
         }
         form = httpx.Request(
@@ -1497,11 +1505,20 @@ class CronometerClient:
             content=form.read(),
             headers={"content-type": form.headers["content-type"]},
         )
+        if resp.status_code in (401, 403) and not _retried:
+            self._reauthenticate(sent_token)
+            return self._save_note(note_id, text, day_str, order, _retried=True)
+
         resp.raise_for_status()
         try:
             data = resp.json()
         except ValueError:
             raise CronometerError(f"Failed to save note: {resp.text[:300]}") from None
+        if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
+            if not _retried:
+                self._reauthenticate(sent_token)
+                return self._save_note(note_id, text, day_str, order, _retried=True)
+            raise CronometerError(f"Failed to save note: {data}")
         if not isinstance(data, dict) or "noteId" not in data:
             raise CronometerError(f"Failed to save note: {data}")
         logger.info("Saved note %s on %s", data["noteId"], day_str)
