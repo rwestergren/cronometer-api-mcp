@@ -975,7 +975,9 @@ def get_macro_targets() -> str:
 
     Returns the macro split (percent of energy for protein, carbs and fat),
     the weekly macro schedule (which template applies to each day) and all
-    saved macro target templates with their values.
+    saved macro target templates with their values. The split describes saved
+    ratios, which are inactive in fixed-target or keto mode; shares are null
+    when the ratio total is unknown or zero.
     """
     try:
         client = _get_client()
@@ -999,6 +1001,9 @@ def set_macro_split(protein: float, carbs: float, fat: float) -> str:
     This changes the user's real targets: confirm the numbers with the user
     first, and read the current split with get_macro_targets so it can be
     put back. Values are percent of energy and must add up to 100.
+    Requires Macro Ratios mode; fixed-target and keto modes are rejected.
+    Failed writes attempt restoration and report the resulting state, which
+    may remain partially changed or unknown if recovery fails.
 
     Args:
         protein: Protein share in percent (e.g. 30).
