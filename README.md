@@ -151,7 +151,8 @@ cached session, so it also overrides a stale cached timezone.
 |------|-------------|
 | `search_activities` | Find activities to log as exercise, by name |
 | `add_exercise` | Log an exercise with its duration and calories burned |
-| `get_macro_targets` | Macro split (percent of energy), weekly macro schedule and saved target templates |
+| `get_macro_targets` | Fixed-gram macro targets, weight goal, macro split (percent of energy), weekly macro schedule and saved target templates |
+| `set_macro_targets` | Set protein / fat / net-carb targets in grams, the weekly weight goal (which moves the calorie target) and the sodium range; writes both the profile prefs and the per-nutrient target rows |
 | `set_macro_split` | Set the protein / carbs / fat split in percent of energy |
 | `get_fasting_history` | Fasting history within a date range |
 | `get_fasting_stats` | Aggregate fasting statistics |
