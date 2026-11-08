@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -50,6 +51,26 @@ def test_get_fixed_macro_targets_reads_prefs_and_rows(tmp_path):
     assert out["sodium_mg_min"] == 1500
     assert out["sodium_mg_max"] == 2300
     assert out["rows"]["fat_g"] == {"min": 143, "max": 143}
+
+
+def test_get_macro_targets_includes_fixed_targets_and_split(tmp_path, monkeypatch):
+    from cronometer_api_mcp import server
+
+    schedules = {"schedules": []}
+    templates = {"templates": []}
+    prefs = profile(macroProtein="2.0", macroCarbs="4.0", macroLipids="4.0")
+    client, _ = make_cold_client(
+        tmp_path, [schedules, templates, prefs, targets(), prefs]
+    )
+    monkeypatch.setattr(server, "_client", client)
+
+    result = json.loads(server.get_macro_targets())
+
+    assert result["status"] == "success"
+    assert result["fixed_targets"]["protein_g"] == 151
+    assert result["macro_split"] == {"protein": 20, "carbs": 40, "fat": 40}
+    assert result["schedules"] == schedules
+    assert result["templates"] == templates
 
 
 @pytest.mark.parametrize("mode", [0, "0"])

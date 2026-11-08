@@ -12,11 +12,15 @@ import asyncio
 import threading
 
 EXPECTED_TOOLS = {
+    "add_biometric",
     "add_custom_food",
+    "add_exercise",
     "add_food_entry",
+    "add_note",
     "add_recipe",
     "copy_day",
     "delete_custom_food",
+    "delete_recipe",
     "get_biometrics",
     "get_daily_nutrition",
     "get_fasting_history",
@@ -30,8 +34,11 @@ EXPECTED_TOOLS = {
     "list_biometrics",
     "mark_day_complete",
     "remove_food_entry",
+    "search_activities",
     "search_foods",
+    "set_macro_split",
     "update_custom_food",
+    "update_note",
 }
 
 
@@ -92,6 +99,7 @@ def test_tool_annotations_reach_wire_model():
     assert tools["get_food_log"].annotations.read_only_hint is True
     assert tools["add_food_entry"].annotations.read_only_hint is False
     assert tools["delete_custom_food"].annotations.destructive_hint is True
+    assert tools["delete_recipe"].annotations.destructive_hint is True
 
 
 def test_no_client_constructed_at_import():
