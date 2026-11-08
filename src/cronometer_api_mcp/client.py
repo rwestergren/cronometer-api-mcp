@@ -172,7 +172,7 @@ class CronometerClient:
     Thread safety: one instance is shared across MCP tool calls, which the SDK
     dispatches on worker threads. Auth state transitions are serialized (see
     `_auth_lock`), and edits to a given custom food are serialized per food id
-    (see `_food_lock`); everything else runs concurrently.
+    (see `_food_lock`). Macro target updates share `_macro_targets_lock`.
     """
 
     def __init__(self, *, session_path: Path | None = None) -> None:
@@ -191,6 +191,7 @@ class CronometerClient:
         # entire object. `_food_locks_guard` protects the lock registry.
         self._food_locks: dict[int, threading.Lock] = {}
         self._food_locks_guard = threading.Lock()
+        self._macro_targets_lock = threading.Lock()
 
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
@@ -1961,9 +1962,9 @@ class CronometerClient:
         prefs (/api/v2/set_pref, value plus its `.max` twin) and the
         per-nutrient target row (/api/v2/edit_target, min = max = value,
         marked custom). Sodium is a target row only. Only the arguments passed
-        change; a one-sided sodium change keeps the other bound. Everything is
-        validated before any call, and both stores are read back; raises if a
-        value did not stick.
+        change; a one-sided sodium change keeps the other bound. Gram updates
+        require Fixed Targets mode. Validation completes before any write,
+        and both stores are read back; raises if a value did not stick.
         """
         grams = {"protein_g": protein_g, "fat_g": fat_g, "net_carbs_g": net_carbs_g}
         for name, val in grams.items():
@@ -2003,25 +2004,14 @@ class CronometerClient:
         if not writes and not touch_sodium:
             raise CronometerError("Pass at least one target to change")
 
-        # 1) profile prefs
-        for key, val in writes.items():
-            data = self._request(
-                "/api/v2/set_pref",
-                {"key": key, "val": val, "config": {"call_version": 1}},
-            )
-            if data.get("result") != "SUCCESS":
-                raise CronometerError(f"set_pref {key} failed: {data}")
-        if writes:
-            prefs = self._get_prefs()
-            wrong = {
-                k: prefs.get(k) for k, v in writes.items() if str(prefs.get(k)) != v
-            }
-            if wrong:
-                raise CronometerError(f"Targets did not read back as written: {wrong}")
-
-        # 2) per-nutrient target rows
-        if row_changes or touch_sodium:
-            rows = self.get_target_rows()
+        with self._macro_targets_lock:
+            if row_changes and self._get_prefs().get("macroIndex") not in (0, "0"):
+                raise CronometerError(
+                    "Gram targets require Fixed Targets mode. Select Fixed Targets "
+                    "in Cronometer's Macro & Energy Targets before retrying; "
+                    "no targets were changed."
+                )
+            rows = self.get_target_rows() if row_changes or touch_sodium else {}
             if touch_sodium:
                 cur = rows.get(SODIUM_ID) or {}
                 lo = (
@@ -2039,22 +2029,43 @@ class CronometerClient:
                         f"sodium min {lo} would be above max {hi}; pass both bounds"
                     )
                 row_changes[SODIUM_ID] = {"min": lo, "max": hi, "cus": True}
-            for nid, changes in row_changes.items():
-                self._edit_target_row(rows.get(nid) or {}, nid, **changes)
-            after = self.get_target_rows()
-            wrong_rows = {
-                nid: after.get(nid)
-                for nid, ch in row_changes.items()
-                if (after.get(nid) or {}).get("min") != ch["min"]
-                or (after.get(nid) or {}).get("max") != ch["max"]
-            }
-            if wrong_rows:
-                raise CronometerError(
-                    f"Target rows did not read back as written: {wrong_rows}"
-                )
 
-        logger.info("Set macro targets: prefs=%s rows=%s", writes, row_changes)
-        return self.get_fixed_macro_targets()
+            # 1) profile prefs
+            for key, val in writes.items():
+                data = self._request(
+                    "/api/v2/set_pref",
+                    {"key": key, "val": val, "config": {"call_version": 1}},
+                )
+                if data.get("result") != "SUCCESS":
+                    raise CronometerError(f"set_pref {key} failed: {data}")
+            if writes:
+                prefs = self._get_prefs()
+                wrong = {
+                    k: prefs.get(k) for k, v in writes.items() if str(prefs.get(k)) != v
+                }
+                if wrong:
+                    raise CronometerError(
+                        f"Targets did not read back as written: {wrong}"
+                    )
+
+            # 2) per-nutrient target rows
+            if row_changes:
+                for nid, changes in row_changes.items():
+                    self._edit_target_row(rows.get(nid) or {}, nid, **changes)
+                after = self.get_target_rows()
+                wrong_rows = {
+                    nid: after.get(nid)
+                    for nid, ch in row_changes.items()
+                    if (after.get(nid) or {}).get("min") != ch["min"]
+                    or (after.get(nid) or {}).get("max") != ch["max"]
+                }
+                if wrong_rows:
+                    raise CronometerError(
+                        f"Target rows did not read back as written: {wrong_rows}"
+                    )
+
+            logger.info("Set macro targets: prefs=%s rows=%s", writes, row_changes)
+            return self.get_fixed_macro_targets()
 
     # ------------------------------------------------------------------
     # Fasting

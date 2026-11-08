@@ -928,6 +928,9 @@ def set_macro_targets(
     with get_macro_targets so they can be put back. Only the arguments you
     pass change.
 
+    Gram targets require Fixed Targets mode in Cronometer's Macro & Energy
+    Targets settings.
+
     The calorie target cannot be set directly: Cronometer computes it from
     BMR, activity level and the weight goal. Move it with
     weight_goal_per_week (in the account's weight unit per week, negative to
