@@ -147,6 +147,14 @@ FIXED_TARGET_PREFS = {
 TARGET_ROW_IDS = {"protein_g": 203, "fat_g": 204, "net_carbs_g": -1205}
 SODIUM_ID = 307
 
+# Profile prefs naming the diary groups (meal slots): DG01..DG08, each with a
+# DGnnON visibility twin. See CronometerClient.get_diary_groups.
+_DIARY_GROUP_PREF = re.compile(r"DG(\d{2})")
+
+# How long resolved diary group names are reused before the profile is read
+# again. A name that isn't found refreshes immediately regardless.
+_DIARY_GROUPS_TTL_SECONDS = 300
+
 
 class CronometerError(Exception):
     """Raised when a Cronometer API call fails."""
@@ -204,6 +212,12 @@ class CronometerClient:
         # Cache of nutrient definitions (id -> {name, unit, category}).
         # Definitions are stable for an account, so fetch them once.
         self._nutrient_defs: dict[int, dict] | None = None
+        # Diary groups (meal slots) are account settings, so they are cached
+        # briefly instead of re-reading the profile on every write. See
+        # resolve_diary_group.
+        self._diary_groups: list[dict] | None = None
+        self._diary_groups_at = 0.0
+        self._diary_groups_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=BASE_URL,
             headers={
@@ -1468,8 +1482,12 @@ class CronometerClient:
             grams: Weight in grams.
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
-            diary_group: Meal group. 0 = auto (based on time of day),
-                         1 = Breakfast, 2 = Lunch, 3 = Dinner, 4 = Snacks.
+            diary_group: Meal group number. 0 = auto: the group is picked by
+                         time of day as 1-4 (see _meal_group_for_hour), which
+                         is Breakfast/Lunch/Dinner/Snacks only on an account
+                         with the default groups. Otherwise the number from
+                         get_diary_groups; resolve_diary_group maps a name to
+                         it.
 
         Returns the serving confirmation dict from the API.
         """
@@ -1522,9 +1540,8 @@ class CronometerClient:
         Args:
             text: The note text.
             day: Date to add it to. Defaults to today.
-            diary_group: Meal group the note sits in, as for add_serving:
-                0 = auto (by time of day), 1 = Breakfast, 2 = Lunch,
-                3 = Dinner, 4 = Snacks.
+            diary_group: Meal group number the note sits in, as for
+                add_serving (0 = auto, by time of day).
 
         Returns the stored note: {"noteId", "text", "day", "order", ...}.
         """
@@ -1893,6 +1910,51 @@ class CronometerClient:
         )
         return {"macros": macros, "nutrients": nutrients}
 
+    def label_diary_groups(self, diary: dict) -> dict:
+        """Add each diary entry's group (meal slot) name (best-effort).
+
+        Every entry's `order` carries its group in the bits above 16, but the
+        number means nothing without the account's group names (see
+        get_diary_groups). This adds to each entry:
+
+          diary_group: {"group": int, "name": str | None}
+
+        `name` is None when the number isn't one of the account's groups,
+        rather than a guess. Disabled groups are named too, since an entry
+        can still sit in one.
+
+        Best-effort like enrich_diary_servings: if the group names can't be
+        read the diary is returned unlabeled. The diary dict is mutated in
+        place and also returned. The profile is only read when at least one
+        entry has an order, and a warm cache makes it free.
+        """
+        if not isinstance(diary, dict):
+            return diary
+        entries = diary.get("diary")
+        if not isinstance(entries, list):
+            return diary
+
+        def entry_group(entry: object) -> int | None:
+            order = entry.get("order") if isinstance(entry, dict) else None
+            if isinstance(order, int) and not isinstance(order, bool) and order >= 0:
+                return order >> 16
+            return None
+
+        if all(entry_group(e) is None for e in entries):
+            return diary
+        try:
+            groups, _ = self._diary_groups_for_lookup()
+        except Exception as exc:  # best-effort: keep the diary unlabeled
+            logger.warning("Diary group labels skipped (profile read failed): %s", exc)
+            return diary
+
+        names = {g["group"]: g["name"] for g in groups}
+        for entry in entries:
+            group = entry_group(entry)
+            if group is not None:
+                entry["diary_group"] = {"group": group, "name": names.get(group)}
+        return diary
+
     def enrich_diary_servings(self, diary: dict) -> dict:
         """Merge food metadata into a raw get_diary payload (best-effort).
 
@@ -2238,6 +2300,104 @@ class CronometerClient:
             if isinstance(pref, dict):
                 prefs.update(pref)
         return prefs
+
+    def get_diary_groups(self) -> list[dict]:
+        """The account's diary groups (meal slots), in diary order.
+
+        Group names are account settings stored as DG01..DG08 profile prefs
+        (name) with a DGnnON twin (visibility). A diary entry's `order` carries
+        its group in the bits above 16 (`order >> 16`), and that index is the
+        pref number minus one: DG01 is group 0 (where exercise and biometrics
+        sit), DG02 is group 1, and so on. The names and count are customizable,
+        so "lunch" is not always group 2 -- resolve names through this list
+        instead of assuming the default Breakfast/Lunch/Dinner/Snacks layout.
+
+        Returns [{"group": int, "pref": "DG04", "name": str, "enabled": bool}].
+        """
+        prefs = self._get_profile_prefs()
+        groups: list[dict] = []
+        for key, value in prefs.items():
+            match = _DIARY_GROUP_PREF.fullmatch(key)
+            if not match:
+                continue
+            number = int(match.group(1))
+            groups.append(
+                {
+                    "group": number - 1,
+                    "pref": key,
+                    "name": str(value) if value else f"Group {number}",
+                    "enabled": str(prefs.get(f"{key}ON", "true")).lower() == "true",
+                }
+            )
+        groups.sort(key=lambda g: g["group"])
+        with self._diary_groups_lock:
+            self._diary_groups = groups
+            self._diary_groups_at = time.monotonic()
+        return groups
+
+    def _diary_groups_for_lookup(self) -> tuple[list[dict], bool]:
+        """Cached diary groups, or a fresh read if the cache is empty or old.
+
+        Returns (groups, fetched) where `fetched` says this call read the
+        profile, so a caller that misses knows a retry would only repeat it.
+        """
+        with self._diary_groups_lock:
+            cached = self._diary_groups
+            age = time.monotonic() - self._diary_groups_at
+        if cached is not None and age < _DIARY_GROUPS_TTL_SECONDS:
+            return cached, False
+        return self.get_diary_groups(), True
+
+    def resolve_diary_group(self, diary_group: str) -> dict:
+        """Turn a diary group name into the group number the write calls take.
+
+        "auto" (any case) resolves to 0, which add_serving, add_note and
+        add_exercise treat as "pick by time of day". Any other value is
+        matched, case-insensitively, against the names of the account's
+        enabled groups (see get_diary_groups), so "dinner" is group 4 on an
+        account with a "Post-workout" slot and 3 on one without.
+
+        A name that isn't in the cached list is looked up again once before
+        failing, so groups renamed or added in the app work without a restart.
+
+        Raises ValueError for an unknown or disabled name, and for the group
+        numbered 0 (Exercise and Biometrics by default): 0 is the "auto"
+        sentinel everywhere below, so it cannot be addressed by name.
+
+        Returns {"group": int, "name": str}; "auto" gives {"group": 0, "name":
+        "auto"}.
+        """
+        key = diary_group.strip().lower()
+        if key == "auto":
+            return {"group": 0, "name": "auto"}
+
+        def find(groups: list[dict]) -> dict | None:
+            return next((g for g in groups if g["name"].strip().lower() == key), None)
+
+        groups, fetched = self._diary_groups_for_lookup()
+        match = find(groups)
+        if match is None and not fetched:
+            groups = self.get_diary_groups()
+            match = find(groups)
+
+        if match is None:
+            names = ["auto"] + [
+                g["name"] for g in groups if g["enabled"] and g["group"] != 0
+            ]
+            raise ValueError(
+                f"Invalid diary_group '{diary_group}'. "
+                f"Must be one of: {', '.join(names)}."
+            )
+        if not match["enabled"]:
+            raise ValueError(
+                f"Diary group '{match['name']}' is disabled in the account."
+            )
+        if match["group"] == 0:
+            raise ValueError(
+                f"Diary group '{match['name']}' is group 0, which means "
+                '"auto" here and cannot be chosen by name.'
+            )
+        return {"group": match["group"], "name": match["name"]}
 
     def get_macro_split(self) -> dict:
         """Saved macro ratios as percentages of energy.
@@ -2654,9 +2814,11 @@ def _v3_diary_entry(entry: dict) -> dict:
 
 
 def _meal_group_for_hour(hour: int) -> int:
-    """Map hour of day to a Cronometer diary meal group.
+    """Map hour of day to a Cronometer diary meal group number.
 
-    1 = Breakfast, 2 = Lunch, 3 = Dinner, 4 = Snacks.
+    Returns 1-4, which are Breakfast, Lunch, Dinner and Snacks only on an
+    account with the default groups; it does not consult the account's own
+    group names. This is what "auto" uses.
     """
     if 4 <= hour < 10:
         return 1  # Breakfast

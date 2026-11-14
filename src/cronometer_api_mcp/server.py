@@ -134,6 +134,17 @@ def _ok(data: dict) -> str:
     return json.dumps({"status": "success", **data}, indent=2)
 
 
+def _group_echo(group: dict) -> dict:
+    """Response field naming the diary group a write was sent to.
+
+    Only for an explicitly named group: "auto" is chosen from the time of day
+    inside the client, so there is nothing resolved to report.
+    """
+    if group["group"] == 0:
+        return {}
+    return {"diary_group": group}
+
+
 def _err(e: Exception) -> str:
     """Wrap an error response with actionable messages."""
     import httpx
@@ -188,6 +199,12 @@ def get_food_log(
     uses reference-serving counts instead of gram weights. An invalid
     serving_size.quantity is reported as null.
 
+    Every diary entry carries diary_group: {group, name}, the meal slot it sits
+    in (e.g. {"group": 4, "name": "Dinner"}). Group names are customizable per
+    account, so read the meal from this field rather than inferring it from
+    the entry's order or time. name is null for a group number the account
+    doesn't define. See get_diary_groups for the full list.
+
     Note: the per-entry "nutrients" are each food's individual contribution,
     which is distinct from the day-level nutrition_summary aggregate below.
 
@@ -230,9 +247,31 @@ def get_food_log(
         return _err(e)
 
 
+@mcp.tool(annotations=_READ_ONLY)
+def get_diary_groups() -> str:
+    """Get the account's diary groups (meal slots) and their names.
+
+    Group names are customizable, so "Lunch" is not always the same slot:
+    an account with extra groups such as "Post-workout" shifts every later
+    group. Use this to interpret entries from get_food_log, whose `order`
+    field carries the group in its upper bits (`order >> 16`):
+    `group` here is that number, so an entry with order 196609 is in group 3.
+
+    Returns each group as {group, pref, name, enabled}, in diary order. Group 0
+    is where exercise and biometrics entries sit. A group with enabled=false is
+    hidden in the app, so no entries are expected there.
+    """
+    try:
+        client = _get_client()
+        return _ok({"groups": client.get_diary_groups()})
+    except Exception as e:
+        return _err(e)
+
+
 def _food_log_for_day(client: CronometerClient, day: date) -> dict:
     data = client.get_diary(day)
     data = client.enrich_diary_servings(data)
+    data = client.label_diary_groups(data)
 
     summary = (data or {}).get("summary") or {}
     target = (summary.get("macros") or {}).get("energy")
@@ -278,28 +317,14 @@ def add_food_entry(
         grams: Weight of the serving in grams.
         date: Date to log as YYYY-MM-DD (defaults to today).
         translation_id: Translation ID from search results (usually 0).
-        diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
-                     "dinner", "snacks" (case-insensitive, default "auto").
+        diary_group: Meal slot: "auto" (default, picks by time of day) or the
+                     name of one of the account's diary groups, matched
+                     case-insensitively. Group names are customizable; call
+                     get_diary_groups to see them.
     """
     try:
-        group_map = {
-            "auto": 0,
-            "breakfast": 1,
-            "lunch": 2,
-            "dinner": 3,
-            "snacks": 4,
-        }
-        group_key = diary_group.strip().lower()
-        group_int = group_map.get(group_key)
-        if group_int is None:
-            return _err(
-                ValueError(
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
-                )
-            )
-
         client = _get_client()
+        group = client.resolve_diary_group(diary_group)
         day = _parse_date(date)
         result = client.add_serving(
             food_id=food_id,
@@ -307,11 +332,12 @@ def add_food_entry(
             grams=grams,
             translation_id=translation_id,
             day=day,
-            diary_group=group_int,
+            diary_group=group["group"],
         )
         return _ok(
             {
                 "entry": result,
+                **_group_echo(group),
                 "note": "Use the serving ID to remove this entry with remove_food_entry.",
             }
         )
@@ -364,22 +390,15 @@ def add_note(text: str, date: str | None = None, diary_group: str = "auto") -> s
     Args:
         text: The note text.
         date: Date as YYYY-MM-DD (defaults to today).
-        diary_group: Meal slot the note sits in -- one of "auto",
-            "breakfast", "lunch", "dinner", "snacks" (default "auto").
+        diary_group: Meal slot the note sits in: "auto" (default, picks by
+            time of day) or the name of one of the account's diary groups,
+            matched case-insensitively (see get_diary_groups).
     """
     try:
-        groups = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
-        group_int = groups.get(diary_group.strip().lower())
-        if group_int is None:
-            return _err(
-                ValueError(
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
-                )
-            )
         client = _get_client()
-        note = client.add_note(text, _parse_date(date), group_int)
-        return _ok({"note": note})
+        group = client.resolve_diary_group(diary_group)
+        note = client.add_note(text, _parse_date(date), group["group"])
+        return _ok({"note": note, **_group_echo(group)})
     except Exception as e:
         return _err(e)
 
@@ -1278,24 +1297,17 @@ def add_exercise(
         minutes: Duration in minutes.
         calories: Calories burned, as a positive number.
         date: Date as YYYY-MM-DD (defaults to today).
-        diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
-            "dinner", "snacks" (default "auto").
+        diary_group: Meal slot: "auto" (default, picks by time of day) or the
+            name of one of the account's diary groups, matched
+            case-insensitively (see get_diary_groups).
     """
     try:
-        groups = {"auto": 0, "breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
-        group_int = groups.get(diary_group.strip().lower())
-        if group_int is None:
-            return _err(
-                ValueError(
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
-                )
-            )
         client = _get_client()
+        group = client.resolve_diary_group(diary_group)
         result = client.add_exercise(
-            activity_id, minutes, calories, _parse_date(date), group_int
+            activity_id, minutes, calories, _parse_date(date), group["group"]
         )
-        return _ok({"exercise": result})
+        return _ok({"exercise": result, **_group_echo(group)})
     except Exception as e:
         return _err(e)
 
