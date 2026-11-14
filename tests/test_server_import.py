@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "delete_recipe",
     "get_biometrics",
     "get_daily_nutrition",
+    "get_diary_groups",
     "get_fasting_history",
     "get_fasting_stats",
     "get_food_details",

@@ -20,6 +20,7 @@ def client(monkeypatch):
         "entries": [],
     }
     client.enrich_diary_servings.side_effect = lambda data: data
+    client.label_diary_groups.side_effect = lambda data: data
     client.get_consumed_nutrients.return_value = {
         "macros": {"energy": 1800, "protein": 100},
         "nutrients": [{"name": "Energy", "amount": 1800, "unit": "kcal"}],
@@ -95,6 +96,7 @@ def test_multi_day_range(client, tool, end, expected):
     if tool is server.get_food_log:
         assert client.get_diary.call_args_list == calls
         assert client.enrich_diary_servings.call_count == 3
+        assert client.label_diary_groups.call_count == 3
 
 
 @pytest.mark.parametrize("tool", [server.get_food_log, server.get_daily_nutrition])
