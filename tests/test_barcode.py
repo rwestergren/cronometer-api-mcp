@@ -1,4 +1,4 @@
-"""Tests for barcode validation of custom foods.
+"""Tests for barcode validation and lookup.
 
 normalize_barcodes accepts the GTIN family (EAN-13, UPC-A, EAN-8, UPC-E,
 GTIN-14), strips the spaces and dashes codes are printed with, and verifies
@@ -8,6 +8,7 @@ the GS1 check digit so a misread digit is rejected rather than saved.
 from __future__ import annotations
 
 import pytest
+from test_client import make_cold_client
 
 from cronometer_api_mcp.barcode import normalize_barcodes
 
@@ -66,3 +67,62 @@ def test_normalize_barcodes_drops_duplicates():
     assert normalize_barcodes(["4006381333931", "4006 3813 3393 1"]) == [
         "4006381333931"
     ]
+
+
+# ---------------------------------------------------------------------------
+# lookup_barcode
+# ---------------------------------------------------------------------------
+
+
+def _food(food_id: int, barcodes: list[str]) -> dict:
+    return {"id": food_id, "name": f"Food {food_id}", "barcodes": barcodes}
+
+
+def test_lookup_barcode_sends_normalized_code(tmp_path):
+    hit = _food(1, ["4006381333931"])
+    client, state = make_cold_client(tmp_path, [{"foodId": 1, "foods": [hit]}])
+
+    assert client.lookup_barcode("400 6381 33393 1") == [hit]
+    assert state["payloads"][0]["query"] == "4006381333931"
+    assert state["payloads"][0]["config"] == {"call_version": 2}
+
+
+def test_lookup_barcode_matches_codes_stored_without_leading_zeros(tmp_path):
+    stored = _food(1, ["10694026", "49000050103"])
+    client, _ = make_cold_client(tmp_path, [{"foodId": 1, "foods": [stored]}])
+
+    assert client.lookup_barcode("049000050103") == [stored]
+
+
+def test_lookup_barcode_drops_foods_without_the_code(tmp_path):
+    """The server answers a placeholder-like code with unrelated foods whose
+    stored barcode is "0"; those must not come back as matches."""
+    hit = _food(1, ["4006381333931"])
+    junk = _food(2, ["0"])
+    client, _ = make_cold_client(tmp_path, [{"foodId": 2, "foods": [junk, hit]}])
+
+    assert client.lookup_barcode("4006381333931") == [hit]
+
+
+def test_lookup_barcode_unknown_code_returns_empty(tmp_path):
+    client, _ = make_cold_client(tmp_path, [{"result": "SUCCESS", "messages": []}])
+
+    assert client.lookup_barcode("4006381333931") == []
+
+
+def test_lookup_barcode_rejects_bad_check_digit_before_request(tmp_path):
+    client, state = make_cold_client(tmp_path, [{"foods": []}])
+
+    with pytest.raises(ValueError, match="check digit"):
+        client.lookup_barcode("4006381333932")
+    assert state["payloads"] == []
+
+
+def test_lookup_barcode_rejects_all_zeros(tmp_path):
+    """All zeros passes the check digit but would match every food stored
+    with the placeholder barcode "0"."""
+    client, state = make_cold_client(tmp_path, [{"foods": []}])
+
+    with pytest.raises(ValueError, match="all zeros"):
+        client.lookup_barcode("0000000000000")
+    assert state["payloads"] == []
