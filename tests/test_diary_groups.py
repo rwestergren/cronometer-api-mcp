@@ -84,24 +84,74 @@ def test_enabled_reads_the_on_twin(tmp_path):
     assert enabled["Group 8"] is False
 
 
-def test_missing_on_twin_defaults_to_enabled_and_blank_name_gets_fallback(tmp_path):
+def test_blank_name_gets_fallback(tmp_path):
     client, _ = make_cold_client(tmp_path, [profile(DG02="Breakfast", DG03="")])
 
     groups = client.get_diary_groups()
 
-    assert groups[0] == {
+    assert groups[1] == {
         "group": 1,
         "pref": "DG02",
         "name": "Breakfast",
         "enabled": True,
     }
-    assert groups[1]["name"] == "Group 3"
+    assert groups[2]["name"] == "Group 3"
 
 
-def test_no_dg_prefs_returns_empty_list(tmp_path):
+def test_no_dg_prefs_uses_cronometer_defaults(tmp_path):
     client, _ = make_cold_client(tmp_path, [profile(weightUnit="Pounds")])
 
-    assert client.get_diary_groups() == []
+    groups = client.get_diary_groups()
+
+    assert [g["name"] for g in groups] == [
+        "Uncategorized",
+        "Breakfast",
+        "Lunch",
+        "Dinner",
+        "Snacks",
+        "Group 6",
+        "Group 7",
+        "Group 8",
+    ]
+    assert [g["enabled"] for g in groups] == [
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert [g["group"] for g in groups] == list(range(8))
+    assert [g["pref"] for g in groups] == [f"DG{i:02}" for i in range(1, 9)]
+
+
+def test_partial_prefs_override_names_and_visibility_independently(tmp_path):
+    client, _ = make_cold_client(
+        tmp_path, [profile(DG02ON="false", DG03="Brunch", DG06ON="true")]
+    )
+
+    groups = client.get_diary_groups()
+
+    assert groups[1]["name"] == "Breakfast"
+    assert groups[1]["enabled"] is False
+    assert groups[2]["name"] == "Brunch"
+    assert groups[2]["enabled"] is True
+    assert groups[3]["name"] == "Dinner"
+    assert groups[5]["name"] == "Group 6"
+    assert groups[5]["enabled"] is True
+
+
+@pytest.mark.parametrize("pref", ["DG06", "DG07", "DG08"])
+def test_extra_groups_without_visibility_prefs_remain_disabled(tmp_path, pref):
+    client, _ = make_cold_client(tmp_path, [profile(**{pref: "Extra meal"})])
+
+    group = next(g for g in client.get_diary_groups() if g["pref"] == pref)
+
+    assert group["enabled"] is False
+    with pytest.raises(ValueError, match="disabled"):
+        client.resolve_diary_group("Extra meal")
 
 
 def test_get_diary_groups_tool(tmp_path, monkeypatch):
@@ -220,9 +270,69 @@ def test_resolve_rejects_group_zero_by_name(tmp_path):
         client.resolve_diary_group("Exercise and Biometrics")
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"DG02": " dinner ", "DG02ON": "false"},
+        {"DG01": " DINNER "},
+        {"DG02": "Dinner", "DG02ON": "false", "DG08": "dinner"},
+    ],
+)
+def test_resolve_ignores_unwritable_groups_with_the_same_name(tmp_path, overrides):
+    client, _ = make_cold_client(tmp_path, [profile(**{**CUSTOM_GROUPS, **overrides})])
+
+    assert client.resolve_diary_group("dinner") == {"group": 4, "name": "Dinner"}
+
+
 # ---------------------------------------------------------------------------
 # Write tools
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,group", [("Breakfast", 1), ("Lunch", 2), ("Dinner", 3), ("Snacks", 4)]
+)
+def test_add_food_entry_uses_default_groups_when_prefs_are_unset(
+    tmp_path, monkeypatch, name, group
+):
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(
+        tmp_path, [profile(), {"result": "SUCCESS", "id": 7}]
+    )
+    monkeypatch.setattr(server, "_client", client)
+
+    result = json.loads(
+        server.add_food_entry(food_id=1, measure_id=0, grams=100, diary_group=name)
+    )
+
+    assert result["status"] == "success"
+    assert result["diary_group"] == {"group": group, "name": name}
+    assert state["payloads"][-1]["serving"]["order"] == (group << 16) | 1
+
+
+@pytest.mark.parametrize(
+    "tool,kwargs",
+    [
+        ("add_food_entry", {"food_id": 1, "measure_id": 0, "grams": 100}),
+        ("add_note", {"text": "late snack"}),
+        ("add_exercise", {"activity_id": 1, "minutes": 30, "calories": 200}),
+    ],
+)
+def test_ambiguous_group_names_do_not_write(tmp_path, monkeypatch, tool, kwargs):
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(
+        tmp_path, [profile(**{**CUSTOM_GROUPS, "DG03": " DINNER "})]
+    )
+    monkeypatch.setattr(server, "_client", client)
+
+    result = json.loads(getattr(server, tool)(**kwargs, diary_group="dinner"))
+
+    assert result["status"] == "error"
+    assert "Ambiguous diary_group 'dinner'" in result["message"]
+    assert "2, 4" in result["message"]
+    assert state["post"] == 1
 
 
 def test_add_food_entry_writes_to_the_named_group_and_echoes_it(tmp_path, monkeypatch):

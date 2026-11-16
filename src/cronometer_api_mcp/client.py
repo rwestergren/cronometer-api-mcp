@@ -147,9 +147,17 @@ FIXED_TARGET_PREFS = {
 TARGET_ROW_IDS = {"protein_g": 203, "fat_g": 204, "net_carbs_g": -1205}
 SODIUM_ID = 307
 
-# Profile prefs naming the diary groups (meal slots): DG01..DG08, each with a
-# DGnnON visibility twin. See CronometerClient.get_diary_groups.
-_DIARY_GROUP_PREF = re.compile(r"DG(\d{2})")
+# Cronometer's defaults when DGnn names or DGnnON visibility prefs are unset.
+_DIARY_GROUP_DEFAULTS = (
+    ("Uncategorized", True),
+    ("Breakfast", True),
+    ("Lunch", True),
+    ("Dinner", True),
+    ("Snacks", True),
+    ("Group 6", False),
+    ("Group 7", False),
+    ("Group 8", False),
+)
 
 # How long resolved diary group names are reused before the profile is read
 # again. A name that isn't found refreshes immediately regardless.
@@ -2311,25 +2319,25 @@ class CronometerClient:
         sit), DG02 is group 1, and so on. The names and count are customizable,
         so "lunch" is not always group 2 -- resolve names through this list
         instead of assuming the default Breakfast/Lunch/Dinner/Snacks layout.
+        Unset names and visibility flags use Cronometer's defaults: groups
+        0-4 are enabled and groups 5-7 are hidden.
 
         Returns [{"group": int, "pref": "DG04", "name": str, "enabled": bool}].
         """
         prefs = self._get_profile_prefs()
         groups: list[dict] = []
-        for key, value in prefs.items():
-            match = _DIARY_GROUP_PREF.fullmatch(key)
-            if not match:
-                continue
-            number = int(match.group(1))
+        for group, (default_name, default_enabled) in enumerate(_DIARY_GROUP_DEFAULTS):
+            key = f"DG{group + 1:02}"
+            value = prefs.get(key, default_name)
             groups.append(
                 {
-                    "group": number - 1,
+                    "group": group,
                     "pref": key,
-                    "name": str(value) if value else f"Group {number}",
-                    "enabled": str(prefs.get(f"{key}ON", "true")).lower() == "true",
+                    "name": str(value) if value else f"Group {group + 1}",
+                    "enabled": str(prefs.get(f"{key}ON", default_enabled)).lower()
+                    == "true",
                 }
             )
-        groups.sort(key=lambda g: g["group"])
         with self._diary_groups_lock:
             self._diary_groups = groups
             self._diary_groups_at = time.monotonic()
@@ -2360,8 +2368,8 @@ class CronometerClient:
         A name that isn't in the cached list is looked up again once before
         failing, so groups renamed or added in the app work without a restart.
 
-        Raises ValueError for an unknown or disabled name, and for the group
-        numbered 0 (Exercise and Biometrics by default): 0 is the "auto"
+        Raises ValueError for an unknown, disabled or ambiguous name, and for
+        the group numbered 0 (Uncategorized by default): 0 is the "auto"
         sentinel everywhere below, so it cannot be addressed by name.
 
         Returns {"group": int, "name": str}; "auto" gives {"group": 0, "name":
@@ -2371,16 +2379,26 @@ class CronometerClient:
         if key == "auto":
             return {"group": 0, "name": "auto"}
 
-        def find(groups: list[dict]) -> dict | None:
-            return next((g for g in groups if g["name"].strip().lower() == key), None)
+        def find(groups: list[dict]) -> list[dict]:
+            return [g for g in groups if g["name"].strip().lower() == key]
 
         groups, fetched = self._diary_groups_for_lookup()
-        match = find(groups)
-        if match is None and not fetched:
+        matches = find(groups)
+        if not matches and not fetched:
             groups = self.get_diary_groups()
-            match = find(groups)
+            matches = find(groups)
 
-        if match is None:
+        writable = [g for g in matches if g["enabled"] and g["group"] != 0]
+        if len(writable) > 1:
+            numbers = ", ".join(str(g["group"]) for g in writable)
+            raise ValueError(
+                f"Ambiguous diary_group '{diary_group}': matches groups {numbers}. "
+                "Give these groups distinct names in Cronometer before retrying."
+            )
+        if writable:
+            match = writable[0]
+            return {"group": match["group"], "name": match["name"]}
+        if not matches:
             names = ["auto"] + [
                 g["name"] for g in groups if g["enabled"] and g["group"] != 0
             ]
@@ -2388,16 +2406,15 @@ class CronometerClient:
                 f"Invalid diary_group '{diary_group}'. "
                 f"Must be one of: {', '.join(names)}."
             )
+        match = matches[0]
         if not match["enabled"]:
             raise ValueError(
                 f"Diary group '{match['name']}' is disabled in the account."
             )
-        if match["group"] == 0:
-            raise ValueError(
-                f"Diary group '{match['name']}' is group 0, which means "
-                '"auto" here and cannot be chosen by name.'
-            )
-        return {"group": match["group"], "name": match["name"]}
+        raise ValueError(
+            f"Diary group '{match['name']}' is group 0, which means "
+            '"auto" here and cannot be chosen by name.'
+        )
 
     def get_macro_split(self) -> dict:
         """Saved macro ratios as percentages of energy.
