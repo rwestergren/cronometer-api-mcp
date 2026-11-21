@@ -781,6 +781,112 @@ def test_update_recipe_rename_only_touches_name_and_translation(tmp_path):
     assert "messages" not in data
 
 
+def serving_based_recipe() -> dict:
+    return stored_recipe(
+        meal=False,
+        nutrients=[{"id": 208, "amount": 141}],
+        measures=[
+            {"id": 1, "name": "Serving", "value": 1, "amount": 1, "type": "Recipe"},
+            {
+                "id": 2,
+                "name": "full recipe",
+                "value": 1,
+                "amount": 1,
+                "type": "Recipe",
+            },
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ingredients": [(5442, 100), (5433, 100)]},
+        {"serving_grams": 50},
+        {"ingredients": [(5442, 150), (5433, 100)], "serving_grams": 50},
+    ],
+)
+def test_update_recipe_refuses_serving_based_nutrition_edits(tmp_path, kwargs):
+    responses = [serving_based_recipe()]
+    if "ingredients" in kwargs:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    with pytest.raises(CronometerError, match="serving-based"):
+        client.update_recipe(FOOD_ID, **kwargs)
+
+    assert len(state["payloads"]) == 1  # only get_food; no ingredient fetch or save
+
+
+def test_update_recipe_serving_based_metadata_keeps_nutrition(tmp_path):
+    client, state = make_cold_client(tmp_path, [serving_based_recipe(), OK])
+
+    client.update_recipe(FOOD_ID, name="Renamed", comments="New instructions")
+
+    data = state["payloads"][1]["data"]
+    assert data["name"] == data["translations"][0]["name"] == "Renamed"
+    assert data["comments"] == "New instructions"
+    for key in ("ingredients", "nutrients", "measures", "defaultMeasureId"):
+        assert data[key] == serving_based_recipe()[key]
+
+
+@pytest.mark.parametrize("ingredients", [None, [(5442, 150), (5433, 100)]])
+def test_update_recipe_refuses_resizing_full_recipe(tmp_path, ingredients):
+    responses = [stored_recipe(defaultMeasureId=2)]
+    if ingredients is not None:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    with pytest.raises(CronometerError, match="full recipe.*default serving"):
+        client.update_recipe(FOOD_ID, ingredients=ingredients, serving_grams=50)
+
+    assert all("data" not in payload for payload in state["payloads"])
+
+
+@pytest.mark.parametrize(
+    ("ingredients", "serving_grams", "expected_grams", "expected_energy"),
+    [
+        (None, 200, 200, 141),
+        ([(5442, 150), (5433, 100)], None, 250, 167),
+        ([(5442, 150), (5433, 100)], 250, 250, 167),
+    ],
+)
+def test_update_recipe_full_recipe_default_keeps_batch_nutrition(
+    tmp_path, monkeypatch, ingredients, serving_grams, expected_grams, expected_energy
+):
+    food = stored_recipe(defaultMeasureId=2, nutrients=[{"id": 208, "amount": 70.5}])
+    responses = [food]
+    if ingredients is not None:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    result = client.update_recipe(
+        FOOD_ID, ingredients=ingredients, serving_grams=serving_grams
+    )
+
+    saved = state["payloads"][-1]["data"]
+    measures = {m["id"]: m for m in saved["measures"]}
+    assert saved["defaultMeasureId"] == 2
+    assert measures[2]["value"] == result["total_grams"] == expected_grams
+    assert measures[3]["value"] == 1
+    monkeypatch.setattr(client, "get_foods", lambda ids: [saved])
+    monkeypatch.setattr(client, "get_nutrient_definitions", dict)
+    diary = client.enrich_diary_servings(
+        {
+            "diary": [
+                {
+                    "type": "Serving",
+                    "foodId": FOOD_ID,
+                    "measureId": 2,
+                    "grams": measures[2]["value"],
+                }
+            ]
+        }
+    )
+    energy = next(n for n in diary["diary"][0]["nutrients"] if n["id"] == 208)
+    assert energy["amount"] == pytest.approx(expected_energy)
+
+
 @pytest.mark.parametrize(
     ("food", "message"),
     [

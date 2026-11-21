@@ -1243,7 +1243,9 @@ class CronometerClient:
         their ids, so diary entries that logged the recipe stay valid (their
         nutrition changes with the recipe, as in the app).
 
-        Saved meals are serving-based and are refused.
+        Saved meals are refused. Serving-based recipes only support name and
+        notes edits. The "full recipe" measure cannot be resized independently
+        of the batch; use a separate default serving for that.
 
         Args:
             food_id: The recipe's food ID.
@@ -1283,6 +1285,13 @@ class CronometerClient:
                 )
 
             measures = food.get("measures") or []
+            if (ingredients is not None or serving_grams is not None) and any(
+                m.get("type") == "Recipe" for m in measures
+            ):
+                raise CronometerError(
+                    f"Recipe {food_id} is serving-based; ingredient and serving-size "
+                    f"updates require a weight-based recipe"
+                )
             full = next((m for m in measures if m.get("name") == "full recipe"), None)
             old_total = full.get("value") if full else None
             default = next(
@@ -1309,6 +1318,11 @@ class CronometerClient:
                 if default is None:
                     raise CronometerError(
                         f"Recipe {food_id} has no default serving to resize"
+                    )
+                if default is full and serving_grams != default.get("value"):
+                    raise CronometerError(
+                        f"Recipe {food_id} uses the full recipe as its default serving; "
+                        f"set a separate default serving in Cronometer before resizing it"
                     )
                 default["value"] = serving_grams
             if name is not None:

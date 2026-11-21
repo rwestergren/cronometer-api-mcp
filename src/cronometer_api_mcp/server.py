@@ -949,6 +949,11 @@ def update_recipe(
     the recipe keep pointing at it and follow the new nutrition, as in the
     app. Saved meals cannot be edited with this tool.
 
+    Ingredient and serving-size edits require a weight-based recipe;
+    serving-based recipes only support name and notes edits. If the default
+    serving is "full recipe", set a separate default serving in Cronometer
+    before resizing it independently of the batch.
+
     Args:
         food_id: The recipe's food ID.
         name: New recipe name.
