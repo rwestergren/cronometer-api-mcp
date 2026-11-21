@@ -687,3 +687,234 @@ def test_concurrent_edits_of_one_food_are_serialized(tmp_path):
     ]
     assert state["payloads"][1]["data"]["name"] == "A"
     assert state["payloads"][3]["data"]["retired"] is True
+
+
+# ---------------------------------------------------------------------------
+# update_recipe
+# ---------------------------------------------------------------------------
+
+APPLE = {
+    "id": 5442,
+    "measures": [{"id": 14990, "name": "g", "value": 1, "amount": 1}],
+    "translations": [{"translationId": 8463}],
+    "nutrients": [{"id": 208, "amount": 52}, {"id": 203, "amount": 0.3}],
+}
+BANANA = {
+    "id": 5433,
+    "measures": [{"id": 14965, "name": "g", "value": 1, "amount": 1}],
+    "translations": [{"translationId": 8445}],
+    "nutrients": [{"id": 208, "amount": 89}, {"id": 203, "amount": 1.1}],
+}
+
+
+def stored_recipe(**overrides) -> dict:
+    """A recipe as get_food returns it after create_recipe: 100 g apple +
+    100 g banana, default serving = the whole 200 g batch."""
+    food = recipe()
+    food.update(
+        defaultMeasureId=1,
+        measures=[
+            {"id": 1, "name": "Serving", "value": 200, "amount": 1, "type": "Weight"},
+            {"id": 2, "name": "full recipe", "value": 200, "amount": 1},
+            {"id": 3, "name": "g", "value": 1, "amount": 1, "type": "Weight"},
+        ],
+        ingredients=[
+            {"id": 11, "foodId": 5442, "measureId": 14990, "grams": 100},
+            {"id": 12, "foodId": 5433, "measureId": 14965, "grams": 100},
+        ],
+        translations=[
+            {"translationId": 1, "name": "Test Recipe", "languageCode": "en"}
+        ],
+    )
+    food.update(overrides)
+    return food
+
+
+def test_update_recipe_recalculates_nutrients_and_batch_measures(tmp_path):
+    client, state = make_cold_client(
+        tmp_path, [stored_recipe(), {"foods": [APPLE, BANANA]}, OK]
+    )
+
+    result = client.update_recipe(FOOD_ID, ingredients=[(5442, 150), (5433, 100)])
+
+    data = state["payloads"][2]["data"]
+    assert data["id"] == FOOD_ID
+    assert [(i["foodId"], i["grams"]) for i in data["ingredients"]] == [
+        (5442, 150.0),
+        (5433, 100.0),
+    ]
+    energy = {n["id"]: n["amount"] for n in data["nutrients"]}[208]
+    assert energy == pytest.approx((52 * 1.5 + 89) / 250 * 100)
+    values = {m["name"]: (m["id"], m["value"]) for m in data["measures"]}
+    assert values["full recipe"] == (2, 250)
+    assert values["Serving"] == (1, 250)  # was the whole batch, stays so
+    assert values["g"] == (3, 1)  # never dropped: the server refuses that
+    assert result == {
+        "food_id": FOOD_ID,
+        "name": "Test Recipe",
+        "total_grams": 250,
+        "ingredient_count": 2,
+    }
+
+
+def test_update_recipe_keeps_a_partial_serving(tmp_path):
+    food = stored_recipe()
+    food["measures"][0]["value"] = 50  # a quarter of the batch
+    client, state = make_cold_client(tmp_path, [food, {"foods": [APPLE, BANANA]}, OK])
+
+    client.update_recipe(FOOD_ID, ingredients=[(5442, 150), (5433, 100)])
+
+    serving = state["payloads"][2]["data"]["measures"][0]
+    assert serving["value"] == 50
+
+
+def test_update_recipe_rename_only_touches_name_and_translation(tmp_path):
+    client, state = make_cold_client(tmp_path, [stored_recipe(), OK])
+
+    client.update_recipe(FOOD_ID, name="Renamed", serving_grams=80)
+
+    data = state["payloads"][1]["data"]
+    assert data["name"] == "Renamed"
+    assert data["translations"][0]["name"] == "Renamed"
+    assert data["ingredients"] == stored_recipe()["ingredients"]
+    assert data["measures"][0]["value"] == 80
+    assert "messages" not in data
+
+
+def serving_based_recipe() -> dict:
+    return stored_recipe(
+        meal=False,
+        nutrients=[{"id": 208, "amount": 141}],
+        measures=[
+            {"id": 1, "name": "Serving", "value": 1, "amount": 1, "type": "Recipe"},
+            {
+                "id": 2,
+                "name": "full recipe",
+                "value": 1,
+                "amount": 1,
+                "type": "Recipe",
+            },
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ingredients": [(5442, 100), (5433, 100)]},
+        {"serving_grams": 50},
+        {"ingredients": [(5442, 150), (5433, 100)], "serving_grams": 50},
+    ],
+)
+def test_update_recipe_refuses_serving_based_nutrition_edits(tmp_path, kwargs):
+    responses = [serving_based_recipe()]
+    if "ingredients" in kwargs:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    with pytest.raises(CronometerError, match="serving-based"):
+        client.update_recipe(FOOD_ID, **kwargs)
+
+    assert len(state["payloads"]) == 1  # only get_food; no ingredient fetch or save
+
+
+def test_update_recipe_serving_based_metadata_keeps_nutrition(tmp_path):
+    client, state = make_cold_client(tmp_path, [serving_based_recipe(), OK])
+
+    client.update_recipe(FOOD_ID, name="Renamed", comments="New instructions")
+
+    data = state["payloads"][1]["data"]
+    assert data["name"] == data["translations"][0]["name"] == "Renamed"
+    assert data["comments"] == "New instructions"
+    for key in ("ingredients", "nutrients", "measures", "defaultMeasureId"):
+        assert data[key] == serving_based_recipe()[key]
+
+
+@pytest.mark.parametrize("ingredients", [None, [(5442, 150), (5433, 100)]])
+def test_update_recipe_refuses_resizing_full_recipe(tmp_path, ingredients):
+    responses = [stored_recipe(defaultMeasureId=2)]
+    if ingredients is not None:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    with pytest.raises(CronometerError, match="full recipe.*default serving"):
+        client.update_recipe(FOOD_ID, ingredients=ingredients, serving_grams=50)
+
+    assert all("data" not in payload for payload in state["payloads"])
+
+
+@pytest.mark.parametrize(
+    ("ingredients", "serving_grams", "expected_grams", "expected_energy"),
+    [
+        (None, 200, 200, 141),
+        ([(5442, 150), (5433, 100)], None, 250, 167),
+        ([(5442, 150), (5433, 100)], 250, 250, 167),
+    ],
+)
+def test_update_recipe_full_recipe_default_keeps_batch_nutrition(
+    tmp_path, monkeypatch, ingredients, serving_grams, expected_grams, expected_energy
+):
+    food = stored_recipe(defaultMeasureId=2, nutrients=[{"id": 208, "amount": 70.5}])
+    responses = [food]
+    if ingredients is not None:
+        responses.append({"foods": [APPLE, BANANA]})
+    client, state = make_cold_client(tmp_path, [*responses, OK])
+
+    result = client.update_recipe(
+        FOOD_ID, ingredients=ingredients, serving_grams=serving_grams
+    )
+
+    saved = state["payloads"][-1]["data"]
+    measures = {m["id"]: m for m in saved["measures"]}
+    assert saved["defaultMeasureId"] == 2
+    assert measures[2]["value"] == result["total_grams"] == expected_grams
+    assert measures[3]["value"] == 1
+    monkeypatch.setattr(client, "get_foods", lambda ids: [saved])
+    monkeypatch.setattr(client, "get_nutrient_definitions", dict)
+    diary = client.enrich_diary_servings(
+        {
+            "diary": [
+                {
+                    "type": "Serving",
+                    "foodId": FOOD_ID,
+                    "measureId": 2,
+                    "grams": measures[2]["value"],
+                }
+            ]
+        }
+    )
+    energy = next(n for n in diary["diary"][0]["nutrients"] if n["id"] == 208)
+    assert energy["amount"] == pytest.approx(expected_energy)
+
+
+@pytest.mark.parametrize(
+    ("food", "message"),
+    [
+        (custom_food(), "not a recipe"),
+        (stored_recipe(meal=True), "saved meal"),
+    ],
+    ids=["plain food", "meal"],
+)
+def test_update_recipe_refuses_non_recipes(tmp_path, food, message):
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    with pytest.raises(CronometerError, match=message):
+        client.update_recipe(FOOD_ID, name="x")
+    assert len(state["payloads"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({}, "needs name"),
+        ({"name": " "}, "empty"),
+        ({"serving_grams": 0}, "positive"),
+        ({"ingredients": []}, "empty"),
+    ],
+)
+def test_update_recipe_validates_before_any_request(tmp_path, kwargs, message):
+    client, state = make_cold_client(tmp_path, [stored_recipe(), OK])
+
+    with pytest.raises(ValueError, match=message):
+        client.update_recipe(FOOD_ID, **kwargs)
+    assert state["payloads"] == []
