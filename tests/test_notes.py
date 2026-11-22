@@ -6,7 +6,9 @@ the session token in a `sessionKey` field instead of the JSON auth block.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dtime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -61,7 +63,7 @@ def test_add_note_posts_multipart_form_with_session_key(tmp_path):
     client, _ = make_cold_client(tmp_path, [{}])
     forms = capture_forms(client)
 
-    note = client.add_note("ate late", DAY, diary_group=3)
+    note = client.add_note("ate late", DAY, diary_group=3, at=dtime(13, 45))
 
     assert forms == [
         {
@@ -72,9 +74,73 @@ def test_add_note_posts_multipart_form_with_session_key(tmp_path):
             "order": str((3 << 16) | 1),
             "deleteExistingPhoto": "true",
             "noteText": "ate late",
+            "time": "13:45:00",
+            "offset": "0",
         }
     ]
     assert note["noteId"] == NOTE_ID
+
+
+def test_add_note_defaults_time_to_now_and_uses_account_zone(tmp_path):
+    client, _ = make_cold_client(tmp_path, [{}])
+    forms = capture_forms(client)
+    zone = ZoneInfo("America/Los_Angeles")
+    client.now = lambda: datetime(2026, 1, 2, 12, 20, 5, tzinfo=zone)  # type: ignore[method-assign]
+    client._tzinfo = lambda: zone  # type: ignore[method-assign]
+
+    client.add_note("now", DAY)
+
+    assert forms[0]["time"] == "12:20:05"
+    assert forms[0]["offset"] == "-480"
+
+
+@pytest.mark.parametrize(
+    ("day", "offset"),
+    [(date(2026, 1, 15), "-480"), (date(2026, 7, 15), "-420")],
+)
+def test_add_note_offset_is_for_the_notes_own_date(tmp_path, day, offset):
+    """A note backfilled across a DST change gets that day's offset, not now's."""
+    client, _ = make_cold_client(tmp_path, [{}])
+    forms = capture_forms(client)
+    zone = ZoneInfo("America/Los_Angeles")
+    client.now = lambda: datetime(2026, 1, 2, 9, 0, 0, tzinfo=zone)  # type: ignore[method-assign]
+    client._tzinfo = lambda: zone  # type: ignore[method-assign]
+
+    client.add_note("backfill", day, at=dtime(12, 0))
+
+    assert forms[0]["offset"] == offset
+
+
+def test_add_note_at_drives_the_auto_group(tmp_path):
+    client, _ = make_cold_client(tmp_path, [{}])
+    forms = capture_forms(client)
+    client.now = lambda: datetime(2026, 1, 2, 23, 0, 0)  # type: ignore[method-assign]
+
+    client.add_note("lunchish", DAY, at=dtime(12, 30))
+
+    assert forms[0]["time"] == "12:30:00"
+    # 12:30 is Lunch, group 2 (see _meal_group_for_hour), not the 23:00 group.
+    assert forms[0]["order"] == str((2 << 16) | 1)
+
+
+def test_update_note_keeps_time_and_offset(tmp_path):
+    stored = {
+        "type": "Note",
+        "noteId": NOTE_ID,
+        "text": "old",
+        "day": "1900-01-02",
+        "order": (2 << 16) | 1,
+        "time": "13:45:00",
+        "offset": -480,
+        "meta": {},
+    }
+    client, _ = make_cold_client(tmp_path, [{"diary": [stored]}])
+    forms = capture_forms(client)
+
+    client.update_note(NOTE_ID, "new", DAY)
+
+    assert forms[0]["time"] == "13:45:00"
+    assert forms[0]["offset"] == "-480"
 
 
 def test_update_note_keeps_day_order_and_photo(tmp_path):

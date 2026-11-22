@@ -395,7 +395,7 @@ class _StubClient:
     def resolve_diary_group(self, name):
         return {"group": 4, "name": "Dinner"}
 
-    def add_note(self, text, day, group):
+    def add_note(self, text, day, group, at=None):
         self.calls.append(("note", group))
         return {"noteId": 1}
 

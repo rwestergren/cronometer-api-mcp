@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import threading
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from typing import Annotated
@@ -96,6 +96,21 @@ def _parse_date(d: str | None) -> date | None:
     if d is None:
         return None
     return date.fromisoformat(d)
+
+
+def _parse_time(t: str | None) -> time | None:
+    """Parse an optional 24h time-of-day, "HH:MM" or "HH:MM:SS"."""
+    if t is None:
+        return None
+    try:
+        value = t.strip()
+        if not re.fullmatch(r"[0-9]{2}:[0-9]{2}(?::[0-9]{2})?", value):
+            raise ValueError
+        return time.fromisoformat(value)
+    except ValueError:
+        raise ValueError(
+            f"Invalid time '{t}'. Use 24-hour HH:MM or HH:MM:SS, e.g. '08:30'."
+        ) from None
 
 
 def _resolve_read_days(d: str | None, days: int = 1) -> list[date]:
@@ -305,6 +320,7 @@ def add_food_entry(
     date: str | None = None,
     translation_id: int = 0,
     diary_group: str = "auto",
+    time: str | None = None,
 ) -> str:
     """Add a food entry to the Cronometer diary.
 
@@ -321,11 +337,15 @@ def add_food_entry(
                      name of one of the account's diary groups, matched
                      case-insensitively. Group names are customizable; call
                      get_diary_groups to see them.
+        time: Time of day to log at, 24-hour HH:MM or HH:MM:SS in the account
+              timezone (defaults to now). With diary_group "auto", this also
+              picks the meal slot, so logging lunch late still lands in lunch.
     """
     try:
         client = _get_client()
         group = client.resolve_diary_group(diary_group)
         day = _parse_date(date)
+        at = _parse_time(time)
         result = client.add_serving(
             food_id=food_id,
             measure_id=measure_id,
@@ -333,6 +353,7 @@ def add_food_entry(
             translation_id=translation_id,
             day=day,
             diary_group=group["group"],
+            at=at,
         )
         return _ok(
             {
@@ -381,7 +402,12 @@ def remove_food_entry(
 
 
 @mcp.tool(annotations=_WRITE)
-def add_note(text: str, date: str | None = None, diary_group: str = "auto") -> str:
+def add_note(
+    text: str,
+    date: str | None = None,
+    diary_group: str = "auto",
+    time: str | None = None,
+) -> str:
     """Add a note to a diary day.
 
     Notes show up in get_food_log's diary as entries of type "Note". Remove
@@ -393,11 +419,16 @@ def add_note(text: str, date: str | None = None, diary_group: str = "auto") -> s
         diary_group: Meal slot the note sits in: "auto" (default, picks by
             time of day) or the name of one of the account's diary groups,
             matched case-insensitively (see get_diary_groups).
+        time: Time of day for the note, 24-hour HH:MM or HH:MM:SS in the
+            account timezone (defaults to now). With diary_group "auto", this
+            also picks the meal slot.
     """
     try:
         client = _get_client()
         group = client.resolve_diary_group(diary_group)
-        note = client.add_note(text, _parse_date(date), group["group"])
+        note = client.add_note(
+            text, _parse_date(date), group["group"], at=_parse_time(time)
+        )
         return _ok({"note": note, **_group_echo(group)})
     except Exception as e:
         return _err(e)

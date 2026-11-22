@@ -121,6 +121,21 @@ def test_explicit_diary_group_skips_auto(tmp_path, frozen_utc):
     assert captured["payload"]["serving"]["order"] == (3 << 16) | 1
 
 
+def test_at_overrides_the_stamped_time_and_drives_auto_group(tmp_path, frozen_utc):
+    """Backfilling lunch at 22:15 (frozen clock: 11:01 local): the entry carries
+    the requested time and auto-groups by it, on the same local day."""
+    client = _client(tmp_path, "America/Los_Angeles")
+    captured = _capture_serving(client)
+
+    client.add_serving(food_id=1, measure_id=0, grams=100.0, at=_dt.time(7, 5, 9))
+
+    serving = captured["payload"]["serving"]
+    assert serving["time"] == "7:5:9"
+    assert serving["day"] == "2026-7-27"
+    # 07:05 -> Breakfast (group 1), not the frozen clock's Lunch.
+    assert serving["order"] == (1 << 16) | 1
+
+
 def test_login_captures_account_timezone(tmp_path, monkeypatch):
     """login() stores the timezone from the response and persists it."""
     monkeypatch.setenv("CRONOMETER_USERNAME", "u@example.com")
