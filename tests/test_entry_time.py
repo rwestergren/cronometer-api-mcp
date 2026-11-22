@@ -22,7 +22,12 @@ def client(monkeypatch):
 
 @pytest.mark.parametrize(
     ("text", "expected"),
-    [("08:30", _dt.time(8, 30)), (" 21:05:09 ", _dt.time(21, 5, 9))],
+    [
+        ("00:00", _dt.time(0, 0)),
+        ("08:30", _dt.time(8, 30)),
+        (" 21:05:09 ", _dt.time(21, 5, 9)),
+        ("23:59:59", _dt.time(23, 59, 59)),
+    ],
 )
 def test_add_food_entry_passes_time_to_the_client(client, text, expected):
     out = json.loads(server.add_food_entry(1, 2, 100.0, time=text))
@@ -43,7 +48,25 @@ def test_time_defaults_to_now(client):
     assert client.add_note.call_args.kwargs["at"] is None
 
 
-@pytest.mark.parametrize("bad", ["", "25:00", "noon", "8"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "25:00",
+        "08:60",
+        "08:30:60",
+        "noon",
+        "8",
+        "08",
+        "0830",
+        "T08:30",
+        "08:30Z",
+        "08:30+02:00",
+        "08:30-08:00",
+        "08:30:00+02:00",
+        "08:30:00.123",
+    ],
+)
 def test_invalid_time_is_an_error_and_writes_nothing(client, bad):
     for out in (
         server.add_food_entry(1, 2, 100.0, time=bad),

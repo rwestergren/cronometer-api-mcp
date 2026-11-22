@@ -103,7 +103,10 @@ def _parse_time(t: str | None) -> time | None:
     if t is None:
         return None
     try:
-        return time.fromisoformat(t.strip())
+        value = t.strip()
+        if not re.fullmatch(r"[0-9]{2}:[0-9]{2}(?::[0-9]{2})?", value):
+            raise ValueError
+        return time.fromisoformat(value)
     except ValueError:
         raise ValueError(
             f"Invalid time '{t}'. Use 24-hour HH:MM or HH:MM:SS, e.g. '08:30'."
