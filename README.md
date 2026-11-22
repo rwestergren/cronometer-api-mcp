@@ -117,7 +117,7 @@ cached session, so it also overrides a stale cached timezone.
 
 | Tool | Description |
 |------|-------------|
-| `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, that food's per-entry nutrient contribution, and the diary group (meal slot) it sits in, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
+| `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, that food's per-entry nutrient contribution, and the diary group (meal slot) it sits in, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient. `detail="compact"` returns a small object per entry instead of the nutrient arrays, and `food_id` narrows the entries to one food |
 | `get_daily_nutrition` | Consumed macro and micronutrient totals for every nutrient tracked in Cronometer |
 | `get_nutrition_scores` | Category scores (Vitamins, Minerals, etc.) with per-nutrient consumed amounts and confidence levels |
 

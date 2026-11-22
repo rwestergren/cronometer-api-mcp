@@ -7,7 +7,7 @@ import threading
 from datetime import date, time, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
@@ -193,6 +193,8 @@ def _err(e: Exception) -> str:
 def get_food_log(
     date: str | None = None,
     days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
+    detail: Literal["full", "compact"] = "full",
+    food_id: int | None = None,
 ) -> str:
     """Get diary entries for one day or the last N calendar days.
 
@@ -219,6 +221,10 @@ def get_food_log(
     account, so read the meal from this field rather than inferring it from
     the entry's order or time. name is null for a group number the account
     doesn't define. See get_diary_groups for the full list.
+
+    A busy day in "full" detail can be ~170,000 characters, which can exceed
+    a client's output limit. Use detail="compact" (and/or food_id) to keep the
+    response small.
 
     Note: the per-entry "nutrients" are each food's individual contribution,
     which is distinct from the day-level nutrition_summary aggregate below.
@@ -248,6 +254,21 @@ def get_food_log(
               Defaults to today in the account timezone, resolved at call time.
         days: Number of calendar days, 1–31 (default 1). Includes the end date;
               days=3 includes today, date='yesterday', days=3 excludes today.
+        detail: "full" (default) returns every entry as described above.
+                "compact" replaces each diary entry with a small object
+                without per-entry nutrient arrays: entry_id (the servingId,
+                noteId, exerciseId or biometricId that remove_food_entry
+                takes), type, name, food_id, measure_id, grams, servings,
+                time, order (raw), diary_group ({group, name}, as above),
+                kcal, protein_g, carbs_g, fat_g, sodium_mg. Notes also carry
+                their text. grams is passed through as-is (null stays null;
+                for serving-based recipes it is a serving count). Values that
+                cannot be derived are null. energy_summary and
+                nutrition_summary are unchanged. Applies to each day.
+        food_id: Only entries for this Cronometer food ID (non-food entries
+                 are excluded). It narrows the diary list only;
+                 energy_summary and nutrition_summary still describe the
+                 whole day. Applies in both detail modes and to each day.
 
     One day returns the usual date/diary/summaries. Multiple days return
     start_date, end_date, and a days list of those objects, oldest first.
@@ -256,7 +277,7 @@ def get_food_log(
         resolved_days = _resolve_read_days(date, days)
         client = _get_client()
         return _read_days_response(
-            [_food_log_for_day(client, day) for day in resolved_days]
+            [_food_log_for_day(client, day, detail, food_id) for day in resolved_days]
         )
     except Exception as e:
         return _err(e)
@@ -283,10 +304,80 @@ def get_diary_groups() -> str:
         return _err(e)
 
 
-def _food_log_for_day(client: CronometerClient, day: date) -> dict:
+# Nutrient ids used by compact entries: key -> nutrient id.
+_COMPACT_NUTRIENTS = {
+    "kcal": 208,
+    "protein_g": 203,
+    "carbs_g": 205,
+    "fat_g": 204,
+    "sodium_mg": 307,
+}
+
+
+def _entry_id(entry: dict):
+    """The ID remove_food_entry takes for this entry, whatever its type."""
+    for key in ("servingId", "noteId", "exerciseId", "biometricId"):
+        if entry.get(key) is not None:
+            return entry[key]
+    return None
+
+
+def _compact_entry(entry: dict) -> dict:
+    amounts = {
+        n.get("id"): n.get("amount")
+        for n in entry.get("nutrients") or []
+        if isinstance(n, dict)
+    }
+    out = {
+        "entry_id": _entry_id(entry),
+        "type": entry.get("type"),
+        "name": entry.get("name"),
+        "food_id": entry.get("foodId"),
+        "measure_id": entry.get("measureId"),
+        "grams": entry.get("grams"),
+        "servings": entry.get("servings"),
+        "time": entry.get("time"),
+        "order": entry.get("order"),
+        "diary_group": entry.get("diary_group"),
+    }
+    for key, nid in _COMPACT_NUTRIENTS.items():
+        amount = amounts.get(nid)
+        out[key] = round(amount, 1) if isinstance(amount, (int, float)) else None
+    if entry.get("type") == "Note":
+        out["text"] = entry.get("text")
+    return out
+
+
+def _food_log_for_day(
+    client: CronometerClient,
+    day: date,
+    detail: str = "full",
+    food_id: int | None = None,
+) -> dict:
+    if detail not in ("full", "compact"):
+        raise ValueError("detail must be 'full' or 'compact'.")
     data = client.get_diary(day)
+    # Filter before enriching so only the kept entries' foods are looked up.
+    if (
+        food_id is not None
+        and isinstance(data, dict)
+        and isinstance(data.get("diary"), list)
+    ):
+        data["diary"] = [
+            e
+            for e in data["diary"]
+            if isinstance(e, dict) and e.get("foodId") == food_id
+        ]
     data = client.enrich_diary_servings(data)
     data = client.label_diary_groups(data)
+    if (
+        detail == "compact"
+        and isinstance(data, dict)
+        and isinstance(data.get("diary"), list)
+    ):
+        data["diary"] = [
+            _compact_entry(e) for e in data["diary"] if isinstance(e, dict)
+        ]
 
     summary = (data or {}).get("summary") or {}
     target = (summary.get("macros") or {}).get("energy")
