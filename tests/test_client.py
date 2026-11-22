@@ -163,11 +163,12 @@ def test_add_serving_cold_start_embeds_real_user_id(tmp_path):
     """First write on a cold client logs in once and sends the real userId."""
     client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 7}])
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=0, grams=100.0, diary_group=0)
 
     assert state["login"] == 1
     assert state["post"] == 1  # no stale-payload double failure (#31)
     assert state["payloads"][0]["serving"]["userId"] == 42
+    assert state["payloads"][0]["serving"]["order"] == 1
 
 
 def test_user_id_property_triggers_login(tmp_path):

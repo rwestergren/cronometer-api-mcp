@@ -21,6 +21,7 @@ import re
 import struct
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
@@ -148,7 +149,7 @@ FIXED_TARGET_PREFS = {
 TARGET_ROW_IDS = {"protein_g": 203, "fat_g": 204, "net_carbs_g": -1205}
 SODIUM_ID = 307
 
-# Cronometer's defaults when DGnn names or DGnnON visibility prefs are unset.
+# Compatibility defaults for missing DGnn names or DGnnON visibility prefs.
 _DIARY_GROUP_DEFAULTS = (
     ("Uncategorized", True),
     ("Breakfast", True),
@@ -1609,7 +1610,7 @@ class CronometerClient:
         grams: float,
         translation_id: int = 0,
         day: date | None = None,
-        diary_group: int = 0,
+        diary_group: int | None = None,
         at: dtime | None = None,
     ) -> dict:
         """Log a food serving to the diary.
@@ -1623,12 +1624,10 @@ class CronometerClient:
             grams: Weight in grams.
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
-            diary_group: Meal group number. 0 = auto: the group is picked by
-                         time of day as 1-4 (see _meal_group_for_hour), which
-                         is Breakfast/Lunch/Dinner/Snacks only on an account
-                         with the default groups. Otherwise the number from
-                         get_diary_groups; resolve_diary_group maps a name to
-                         it.
+            diary_group: Group number from get_diary_groups, including 0.
+                         None picks by time of day and requires unique enabled
+                         Breakfast/Lunch/Dinner/Snacks names in the account.
+                         resolve_diary_group maps an explicit name to a number.
             at: Time of day to stamp the entry with, in the account timezone.
                 Defaults to now. Also drives the auto meal group.
 
@@ -1638,8 +1637,8 @@ class CronometerClient:
         day_str = self._format_day(day)
         time_str = f"{when.hour}:{when.minute}:{when.second}"
 
-        if diary_group == 0:
-            diary_group = _meal_group_for_hour(when.hour)
+        if diary_group is None:
+            diary_group = self._auto_diary_group_for_hour(when.hour)
 
         serving = {
             "order": (diary_group << 16) | 1,
@@ -1679,7 +1678,7 @@ class CronometerClient:
         self,
         text: str,
         day: date | None = None,
-        diary_group: int = 0,
+        diary_group: int | None = None,
         at: dtime | None = None,
     ) -> dict:
         """Add a note to a diary day.
@@ -1688,7 +1687,7 @@ class CronometerClient:
             text: The note text.
             day: Date to add it to. Defaults to today.
             diary_group: Meal group number the note sits in, as for
-                add_serving (0 = auto, by time of day).
+                add_serving (None = auto, by time of day; 0 is a real group).
             at: Time of day to stamp the note with, in the account timezone.
                 Defaults to now. Also drives the auto meal group.
 
@@ -1696,8 +1695,8 @@ class CronometerClient:
         """
         now = self.now()
         when = at or now.time()
-        if diary_group == 0:
-            diary_group = _meal_group_for_hour(when.hour)
+        if diary_group is None:
+            diary_group = self._auto_diary_group_for_hour(when.hour)
         # The UTC offset in force on the note's own date and time, in the
         # account's zone (not now's offset: they differ across a DST change).
         stamped = datetime.combine(day or now.date(), when, tzinfo=self._tzinfo())
@@ -2482,11 +2481,11 @@ class CronometerClient:
         Group names are account settings stored as DG01..DG08 profile prefs
         (name) with a DGnnON twin (visibility). A diary entry's `order` carries
         its group in the bits above 16 (`order >> 16`), and that index is the
-        pref number minus one: DG01 is group 0 (where exercise and biometrics
-        sit), DG02 is group 1, and so on. The names and count are customizable,
+        pref number minus one: DG01 is group 0, DG02 is group 1, and so on.
+        The names and count are customizable,
         so "lunch" is not always group 2 -- resolve names through this list
         instead of assuming the default Breakfast/Lunch/Dinner/Snacks layout.
-        Unset names and visibility flags use Cronometer's defaults: groups
+        Unset names and visibility flags use compatibility defaults: groups
         0-4 are enabled and groups 5-7 are hidden.
 
         Returns [{"group": int, "pref": "DG04", "name": str, "enabled": bool}].
@@ -2526,28 +2525,27 @@ class CronometerClient:
     def resolve_diary_group(self, diary_group: str) -> dict:
         """Turn a diary group name into the group number the write calls take.
 
-        "auto" (any case) resolves to 0, which add_serving, add_note and
+        "auto" (any case) resolves to None, which add_serving, add_note and
         add_exercise treat as "pick by time of day". Any other value is
-        matched, case-insensitively, against the names of the account's
+        matched, ignoring case and whitespace, against the names of the account's
         enabled groups (see get_diary_groups), so "dinner" is group 4 on an
         account with a "Post-workout" slot and 3 on one without.
 
         A name that isn't in the cached list is looked up again once before
         failing, so groups renamed or added in the app work without a restart.
 
-        Raises ValueError for an unknown, disabled or ambiguous name, and for
-        the group numbered 0 (Uncategorized by default): 0 is the "auto"
-        sentinel everywhere below, so it cannot be addressed by name.
+        Raises ValueError for an unknown, disabled or ambiguous name.
+        Group 0 is writable like every other enabled group.
 
-        Returns {"group": int, "name": str}; "auto" gives {"group": 0, "name":
+        Returns {"group": int, "name": str}; "auto" gives {"group": None, "name":
         "auto"}.
         """
-        key = diary_group.strip().lower()
+        key = _diary_group_key(diary_group)
         if key == "auto":
-            return {"group": 0, "name": "auto"}
+            return {"group": None, "name": "auto"}
 
         def find(groups: list[dict]) -> list[dict]:
-            return [g for g in groups if g["name"].strip().lower() == key]
+            return [g for g in groups if _diary_group_key(g["name"]) == key]
 
         groups, fetched = self._diary_groups_for_lookup()
         matches = find(groups)
@@ -2555,7 +2553,7 @@ class CronometerClient:
             groups = self.get_diary_groups()
             matches = find(groups)
 
-        writable = [g for g in matches if g["enabled"] and g["group"] != 0]
+        writable = [g for g in matches if g["enabled"]]
         if len(writable) > 1:
             numbers = ", ".join(str(g["group"]) for g in writable)
             raise ValueError(
@@ -2566,22 +2564,42 @@ class CronometerClient:
             match = writable[0]
             return {"group": match["group"], "name": match["name"]}
         if not matches:
-            names = ["auto"] + [
-                g["name"] for g in groups if g["enabled"] and g["group"] != 0
-            ]
+            names = ["auto"] + [g["name"] for g in groups if g["enabled"]]
             raise ValueError(
                 f"Invalid diary_group '{diary_group}'. "
                 f"Must be one of: {', '.join(names)}."
             )
-        match = matches[0]
-        if not match["enabled"]:
-            raise ValueError(
-                f"Diary group '{match['name']}' is disabled in the account."
-            )
         raise ValueError(
-            f"Diary group '{match['name']}' is group 0, which means "
-            '"auto" here and cannot be chosen by name.'
+            f"Diary group '{matches[0]['name']}' is disabled in the account."
         )
+
+    def _auto_diary_group_for_hour(self, hour: int) -> int:
+        """Resolve all four meal names from one account layout before picking."""
+
+        def find(groups: list[dict]) -> dict[str, list[int]]:
+            meals: dict[str, list[int]] = {
+                name: [] for name in ("breakfast", "lunch", "dinner", "snacks")
+            }
+            for group in groups:
+                key = _diary_group_key(group["name"])
+                if group["enabled"] and key in meals:
+                    meals[key].append(group["group"])
+            return meals
+
+        groups, fetched = self._diary_groups_for_lookup()
+        meals = find(groups)
+        if any(len(matches) != 1 for matches in meals.values()) and not fetched:
+            groups = self.get_diary_groups()
+            meals = find(groups)
+        if any(len(matches) != 1 for matches in meals.values()):
+            names = ", ".join(g["name"] for g in groups if g["enabled"]) or "(none)"
+            raise ValueError(
+                "Cannot resolve diary_group 'auto': requires unique enabled "
+                "Breakfast, Lunch, Dinner and Snacks groups. "
+                f"Available groups: {names}. "
+                "Choose an explicit diary_group from get_diary_groups."
+            )
+        return meals[_meal_name_for_hour(hour)][0]
 
     def get_macro_split(self) -> dict:
         """Saved macro ratios as percentages of energy.
@@ -2856,7 +2874,7 @@ class CronometerClient:
         minutes: float,
         calories: float,
         day: date | None = None,
-        diary_group: int = 0,
+        diary_group: int | None = None,
     ) -> dict:
         """Log an exercise with a given calorie burn.
 
@@ -2871,7 +2889,7 @@ class CronometerClient:
             minutes: Duration in minutes.
             calories: Calories burned (a positive number).
             day: Date to log to. Defaults to today.
-            diary_group: Meal group, as for add_serving (0 = auto).
+            diary_group: Meal group, as for add_serving (None = auto).
 
         Uses: POST /api/v2/add_exercise
 
@@ -2881,8 +2899,8 @@ class CronometerClient:
             raise ValueError(f"minutes must be positive, got {minutes}")
         if not math.isfinite(calories) or calories < 0:
             raise ValueError(f"calories must be zero or positive, got {calories}")
-        if diary_group == 0:
-            diary_group = _meal_group_for_hour(self.now().hour)
+        if diary_group is None:
+            diary_group = self._auto_diary_group_for_hour(self.now().hour)
 
         exercise = {
             "exerciseId": None,
@@ -2997,18 +3015,18 @@ def _v3_diary_entry(entry: dict) -> dict:
     return out
 
 
-def _meal_group_for_hour(hour: int) -> int:
-    """Map hour of day to a Cronometer diary meal group number.
+def _diary_group_key(name: str) -> str:
+    """Match account names without translating them or discarding accents."""
+    return "".join(unicodedata.normalize("NFC", name).casefold().split())
 
-    Returns 1-4, which are Breakfast, Lunch, Dinner and Snacks only on an
-    account with the default groups; it does not consult the account's own
-    group names. This is what "auto" uses.
-    """
+
+def _meal_name_for_hour(hour: int) -> str:
+    """Pick a meal name; its group number comes from the account's prefs."""
     if 4 <= hour < 10:
-        return 1  # Breakfast
+        return "breakfast"
     elif 10 <= hour < 14:
-        return 2  # Lunch
+        return "lunch"
     elif 14 <= hour < 21:
-        return 3  # Dinner
+        return "dinner"
     else:
-        return 4  # Snacks
+        return "snacks"

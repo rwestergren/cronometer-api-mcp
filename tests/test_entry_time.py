@@ -13,7 +13,7 @@ from cronometer_api_mcp.client import CronometerClient
 @pytest.fixture
 def client(monkeypatch):
     c = Mock(spec=CronometerClient)
-    c.resolve_diary_group.return_value = {"group": 0, "name": "auto"}
+    c.resolve_diary_group.return_value = {"group": None, "name": "auto"}
     c.add_serving.return_value = {"id": 1}
     c.add_note.return_value = {"noteId": 2}
     monkeypatch.setattr(server, "_client", c)
