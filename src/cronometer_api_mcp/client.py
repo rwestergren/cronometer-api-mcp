@@ -21,7 +21,8 @@ import re
 import struct
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -1609,6 +1610,7 @@ class CronometerClient:
         translation_id: int = 0,
         day: date | None = None,
         diary_group: int = 0,
+        at: dtime | None = None,
     ) -> dict:
         """Log a food serving to the diary.
 
@@ -1627,15 +1629,17 @@ class CronometerClient:
                          with the default groups. Otherwise the number from
                          get_diary_groups; resolve_diary_group maps a name to
                          it.
+            at: Time of day to stamp the entry with, in the account timezone.
+                Defaults to now. Also drives the auto meal group.
 
         Returns the serving confirmation dict from the API.
         """
-        now = self.now()
+        when = at or self.now().time()
         day_str = self._format_day(day)
-        time_str = f"{now.hour}:{now.minute}:{now.second}"
+        time_str = f"{when.hour}:{when.minute}:{when.second}"
 
         if diary_group == 0:
-            diary_group = _meal_group_for_hour(now.hour)
+            diary_group = _meal_group_for_hour(when.hour)
 
         serving = {
             "order": (diary_group << 16) | 1,
@@ -1672,7 +1676,11 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     def add_note(
-        self, text: str, day: date | None = None, diary_group: int = 0
+        self,
+        text: str,
+        day: date | None = None,
+        diary_group: int = 0,
+        at: dtime | None = None,
     ) -> dict:
         """Add a note to a diary day.
 
@@ -1681,12 +1689,30 @@ class CronometerClient:
             day: Date to add it to. Defaults to today.
             diary_group: Meal group number the note sits in, as for
                 add_serving (0 = auto, by time of day).
+            at: Time of day to stamp the note with, in the account timezone.
+                Defaults to now. Also drives the auto meal group.
 
-        Returns the stored note: {"noteId", "text", "day", "order", ...}.
+        Returns the stored note: {"noteId", "text", "day", "time", "order", ...}.
         """
+        now = self.now()
+        when = at or now.time()
         if diary_group == 0:
-            diary_group = _meal_group_for_hour(self.now().hour)
-        return self._save_note(0, text, self._format_day(day), (diary_group << 16) | 1)
+            diary_group = _meal_group_for_hour(when.hour)
+        # The UTC offset in force on the note's own date and time, in the
+        # account's zone (not now's offset: they differ across a DST change).
+        stamped = datetime.combine(day or now.date(), when, tzinfo=self._tzinfo())
+        offset = int((stamped.utcoffset() or timedelta(0)).total_seconds() // 60)
+        extra = {
+            "time": f"{when.hour:02d}:{when.minute:02d}:{when.second:02d}",
+            "offset": str(offset),
+        }
+        return self._save_note(
+            0,
+            text,
+            self._format_day(day),
+            (diary_group << 16) | 1,
+            extra=extra,
+        )
 
     def update_note(self, note_id: int, text: str, day: date | None = None) -> dict:
         """Replace the text of an existing diary note, keeping its place.
@@ -1706,7 +1732,11 @@ class CronometerClient:
             raise CronometerError(
                 f"No note {note_id} in the diary for {self._format_day(day)}"
             )
-        return self._save_note(note["noteId"], text, note["day"], note["order"])
+        # Send the stored time and offset back so an edit doesn't drop them.
+        extra = {k: str(note[k]) for k in ("time", "offset") if note.get(k) is not None}
+        return self._save_note(
+            note["noteId"], text, note["day"], note["order"], extra=extra
+        )
 
     def _save_note(
         self,
@@ -1715,6 +1745,7 @@ class CronometerClient:
         day_str: str,
         order: int,
         *,
+        extra: dict[str, str] | None = None,
         _retried: bool = False,
     ) -> dict:
         """Create (note_id 0) or overwrite a note via /photoupload.
@@ -1735,6 +1766,7 @@ class CronometerClient:
             "order": str(order),
             "deleteExistingPhoto": "true" if note_id == 0 else "false",
             "noteText": text,
+            **(extra or {}),
         }
         form = httpx.Request(
             "POST", "/", files={k: (None, v) for k, v in fields.items()}
@@ -1746,7 +1778,9 @@ class CronometerClient:
         )
         if resp.status_code in (401, 403) and not _retried:
             self._reauthenticate(sent_token)
-            return self._save_note(note_id, text, day_str, order, _retried=True)
+            return self._save_note(
+                note_id, text, day_str, order, extra=extra, _retried=True
+            )
 
         resp.raise_for_status()
         try:
@@ -1756,7 +1790,9 @@ class CronometerClient:
         if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
             if not _retried:
                 self._reauthenticate(sent_token)
-                return self._save_note(note_id, text, day_str, order, _retried=True)
+                return self._save_note(
+                    note_id, text, day_str, order, extra=extra, _retried=True
+                )
             raise CronometerError(f"Failed to save note: {data}")
         if not isinstance(data, dict) or "noteId" not in data:
             raise CronometerError(f"Failed to save note: {data}")

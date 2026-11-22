@@ -133,7 +133,7 @@ cached session, so it also overrides a stale cached timezone.
 | Tool | Description |
 |------|-------------|
 | `get_diary_groups` | The account's diary groups (meal slots) and their names, for interpreting the group in each entry's `order` |
-| `add_food_entry` | Log a food serving to the diary |
+| `add_food_entry` | Log a food serving to the diary, optionally at a given time of day |
 | `remove_food_entry` | Remove one or more diary entries: foods, exercises, notes or biometrics |
 | `add_custom_food` | Create a custom food with specified nutrition and optional barcodes |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, serving size, or barcodes |
@@ -144,7 +144,7 @@ cached session, so it also overrides a stale cached timezone.
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
-| `add_note` | Add a note to a diary day |
+| `add_note` | Add a note to a diary day, optionally at a given time of day |
 | `update_note` | Replace the text of a diary note |
 
 ### Targets & Tracking
