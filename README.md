@@ -164,6 +164,22 @@ cached session, so it also overrides a stale cached timezone.
 
 All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
+### Diary groups
+
+`add_food_entry`, `add_note`, and `add_exercise` accept `diary_group="auto"`
+or an enabled group name from `get_diary_groups`. Names match ignoring case
+and whitespace, in any language. Group 0 and Uncategorized are writable;
+duplicate enabled names must be made distinct in Cronometer.
+
+`"auto"` requires unique enabled groups named Breakfast, Lunch, Dinner, and
+Snacks, in any positions. It picks by the entry's time in the account timezone
+(`time=` for food and notes, or now). If any of those names is missing,
+disabled, or ambiguous, choose an explicit group name. Missing profile prefs
+use compatibility defaults; explicit names and visibility flags take precedence.
+
+Python client callers: omit `diary_group` or pass `None` for automatic selection.
+An integer, including `0`, always selects that actual group number.
+
 ### Relative dates and recent days
 
 `get_food_log`, `get_daily_nutrition`, and `get_nutrition_scores` also accept

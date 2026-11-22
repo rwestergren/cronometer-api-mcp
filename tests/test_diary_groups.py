@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from test_client import make_cold_client
+from test_notes import capture_forms
 
 from cronometer_api_mcp import client as client_module
 
@@ -37,6 +38,31 @@ CUSTOM_GROUPS = {
     "DG_ON": "true",
     "weightUnit": "Pounds",
 }
+
+BREAKFAST_FIRST = {
+    "DG01": "Breakfast",
+    "DG01ON": "true",
+    "DG02": "Lunch",
+    "DG02ON": "true",
+    "DG03": "Dinner",
+    "DG03ON": "true",
+    "DG04": "Snacks",
+    "DG04ON": "true",
+    "DG05": "Uncategorized",
+    "DG05ON": "true",
+    "DG06": "Post workout",
+    "DG06ON": "false",
+    "DG07": "Group 7",
+    "DG07ON": "false",
+    "DG08": "Group 8",
+    "DG08ON": "false",
+}
+
+WRITE_TOOLS = [
+    ("add_food_entry", {"food_id": 1, "measure_id": 0, "grams": 100}),
+    ("add_note", {"text": "late snack"}),
+    ("add_exercise", {"activity_id": 1, "minutes": 30, "calories": 200}),
+]
 
 
 def test_group_index_is_pref_number_minus_one(tmp_path):
@@ -187,11 +213,11 @@ def test_resolve_names_use_the_accounts_numbers(tmp_path):
     assert client.resolve_diary_group("Pre-bedtime")["group"] == 5
 
 
-def test_resolve_auto_is_zero_without_reading_the_profile(tmp_path):
+def test_resolve_auto_defers_selection_until_the_entry_time_is_known(tmp_path):
     client, state = make_cold_client(tmp_path, [profile(**CUSTOM_GROUPS)])
 
-    assert client.resolve_diary_group("auto") == {"group": 0, "name": "auto"}
-    assert client.resolve_diary_group(" AUTO ")["group"] == 0
+    assert client.resolve_diary_group("auto") == {"group": None, "name": "auto"}
+    assert client.resolve_diary_group(" AUTO ")["group"] is None
     assert state["post"] == 0
 
 
@@ -250,9 +276,8 @@ def test_resolve_unknown_name_lists_the_valid_ones(tmp_path):
     assert "Invalid diary_group 'brunch'" in message
     for name in ("auto", "Breakfast", "Post-workout", "Dinner", "Snacks"):
         assert name in message
-    # Hidden and sentinel groups are not offered.
     assert "Group 8" not in message
-    assert "Exercise and Biometrics" not in message
+    assert "Exercise and Biometrics" in message
 
 
 def test_resolve_rejects_a_disabled_group(tmp_path):
@@ -262,23 +287,53 @@ def test_resolve_rejects_a_disabled_group(tmp_path):
         client.resolve_diary_group("group 8")
 
 
-def test_resolve_rejects_group_zero_by_name(tmp_path):
-    """0 is the auto sentinel, so group 0 can't be addressed by name."""
+def test_resolve_accepts_group_zero_by_name(tmp_path):
     client, _ = make_cold_client(tmp_path, [profile(**CUSTOM_GROUPS)])
 
-    with pytest.raises(ValueError, match="auto"):
-        client.resolve_diary_group("Exercise and Biometrics")
+    assert client.resolve_diary_group("Exercise and Biometrics") == {
+        "group": 0,
+        "name": "Exercise and Biometrics",
+    }
+
+
+@pytest.mark.parametrize(
+    "stored,requested",
+    [
+        ("Petit déjeuner", "  PETIT\tDÉJEUNER "),
+        ("Dîner", "DI\u0302NER"),
+        ("Straße", "STRASSE"),
+        ("夕食", "夕 食"),
+    ],
+)
+def test_resolve_localized_names_ignores_case_and_whitespace(
+    tmp_path, stored, requested
+):
+    client, _ = make_cold_client(
+        tmp_path, [profile(**{**BREAKFAST_FIRST, "DG01": stored})]
+    )
+
+    assert client.resolve_diary_group(requested) == {"group": 0, "name": stored}
+
+
+def test_resolve_does_not_translate_or_strip_accents(tmp_path):
+    client, _ = make_cold_client(
+        tmp_path, [profile(**{**BREAKFAST_FIRST, "DG03": "Dîner"})]
+    )
+
+    for name in ("Dinner", "Diner"):
+        with pytest.raises(ValueError, match="Invalid diary_group"):
+            client.resolve_diary_group(name)
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
         {"DG02": " dinner ", "DG02ON": "false"},
-        {"DG01": " DINNER "},
+        {"DG01": " DINNER ", "DG01ON": "false"},
         {"DG02": "Dinner", "DG02ON": "false", "DG08": "dinner"},
     ],
 )
-def test_resolve_ignores_unwritable_groups_with_the_same_name(tmp_path, overrides):
+def test_resolve_ignores_disabled_groups_with_the_same_name(tmp_path, overrides):
     client, _ = make_cold_client(tmp_path, [profile(**{**CUSTOM_GROUPS, **overrides})])
 
     assert client.resolve_diary_group("dinner") == {"group": 4, "name": "Dinner"}
@@ -311,28 +366,26 @@ def test_add_food_entry_uses_default_groups_when_prefs_are_unset(
     assert state["payloads"][-1]["serving"]["order"] == (group << 16) | 1
 
 
-@pytest.mark.parametrize(
-    "tool,kwargs",
-    [
-        ("add_food_entry", {"food_id": 1, "measure_id": 0, "grams": 100}),
-        ("add_note", {"text": "late snack"}),
-        ("add_exercise", {"activity_id": 1, "minutes": 30, "calories": 200}),
-    ],
-)
-def test_ambiguous_group_names_do_not_write(tmp_path, monkeypatch, tool, kwargs):
+@pytest.mark.parametrize("tool,kwargs", WRITE_TOOLS)
+@pytest.mark.parametrize("pref,numbers", [("DG01", "0, 4"), ("DG03", "2, 4")])
+def test_ambiguous_group_names_do_not_write(
+    tmp_path, monkeypatch, tool, kwargs, pref, numbers
+):
     from cronometer_api_mcp import server
 
     client, state = make_cold_client(
-        tmp_path, [profile(**{**CUSTOM_GROUPS, "DG03": " DINNER "})]
+        tmp_path, [profile(**{**CUSTOM_GROUPS, pref: " DIN NER "})]
     )
     monkeypatch.setattr(server, "_client", client)
+    forms = capture_forms(client)
 
     result = json.loads(getattr(server, tool)(**kwargs, diary_group="dinner"))
 
     assert result["status"] == "error"
     assert "Ambiguous diary_group 'dinner'" in result["message"]
-    assert "2, 4" in result["message"]
+    assert numbers in result["message"]
     assert state["post"] == 1
+    assert forms == []
 
 
 def test_add_food_entry_writes_to_the_named_group_and_echoes_it(tmp_path, monkeypatch):
@@ -353,22 +406,177 @@ def test_add_food_entry_writes_to_the_named_group_and_echoes_it(tmp_path, monkey
     assert serving["order"] == (4 << 16) | 1
 
 
-def test_add_food_entry_auto_keeps_the_hour_based_numbers(tmp_path, monkeypatch):
-    """auto is unchanged: hour -> 1-4, with no profile read and no echo."""
+@pytest.mark.parametrize("tool,kwargs", WRITE_TOOLS)
+@pytest.mark.parametrize(
+    "prefs,name,group",
+    [
+        (BREAKFAST_FIRST, "Breakfast", 0),
+        (BREAKFAST_FIRST, "Uncategorized", 4),
+        ({}, "Uncategorized", 0),
+        (CUSTOM_GROUPS, "Pre-bedtime", 5),
+    ],
+)
+def test_named_groups_are_written_and_echoed(
+    tmp_path, monkeypatch, tool, kwargs, prefs, name, group
+):
     from cronometer_api_mcp import server
 
-    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 7}])
-    monkeypatch.setattr(server, "_client", client)
-    monkeypatch.setattr(
-        client, "now", lambda: datetime(2026, 11, 13, 19, 8, tzinfo=UTC)
+    account = profile(**{**prefs, "weightInKG": 80})
+    responses = [account] * (2 if tool == "add_exercise" else 1)
+    client, state = make_cold_client(
+        tmp_path, [*responses, {"result": "SUCCESS", "id": 7}]
     )
+    monkeypatch.setattr(server, "_client", client)
+    forms = capture_forms(client)
 
-    result = json.loads(server.add_food_entry(food_id=1, measure_id=0, grams=100))
+    result = json.loads(getattr(server, tool)(**kwargs, diary_group=name))
+
+    assert result["status"] == "success"
+    assert result["diary_group"] == {"group": group, "name": name}
+    if tool == "add_note":
+        assert int(forms[0]["order"]) == (group << 16) | 1
+    else:
+        entry = "exercise" if tool == "add_exercise" else "serving"
+        assert state["payloads"][-1][entry]["order"] == (group << 16) | 1
+
+
+@pytest.mark.parametrize("tool,kwargs", WRITE_TOOLS)
+@pytest.mark.parametrize(
+    "prefs,groups",
+    [
+        (BREAKFAST_FIRST, (0, 1, 2, 3)),
+        (CUSTOM_GROUPS, (1, 3, 4, 6)),
+        ({}, (1, 2, 3, 4)),
+    ],
+    ids=["breakfast-first", "custom", "missing-prefs"],
+)
+@pytest.mark.parametrize(
+    "hour,meal", [(3, 3), (4, 0), (9, 0), (10, 1), (13, 1), (14, 2), (20, 2), (21, 3)]
+)
+def test_auto_writes_to_account_groups_using_the_entry_time(
+    tmp_path, monkeypatch, tool, kwargs, prefs, groups, hour, meal
+):
+    from cronometer_api_mcp import server
+
+    account = profile(**{**prefs, "weightInKG": 80})
+    responses = [account] * (2 if tool == "add_exercise" else 1)
+    client, state = make_cold_client(
+        tmp_path, [*responses, {"result": "SUCCESS", "id": 7}]
+    )
+    monkeypatch.setattr(server, "_client", client)
+    forms = capture_forms(client)
+    clock_hour = hour if tool == "add_exercise" else 0
+    monkeypatch.setattr(
+        client, "now", lambda: datetime(2026, 11, 13, clock_hour, 8, tzinfo=UTC)
+    )
+    at = {} if tool == "add_exercise" else {"time": f"{hour:02}:30"}
+
+    result = json.loads(getattr(server, tool)(**kwargs, **at))
 
     assert result["status"] == "success"
     assert "diary_group" not in result
-    assert state["post"] == 1  # just the add_serving call
-    assert state["payloads"][-1]["serving"]["order"] == (3 << 16) | 1
+    if tool == "add_note":
+        assert int(forms[0]["order"]) == (groups[meal] << 16) | 1
+        assert forms[0]["time"] == f"{hour:02}:30:00"
+    else:
+        entry = "exercise" if tool == "add_exercise" else "serving"
+        assert state["payloads"][-1][entry]["order"] == (groups[meal] << 16) | 1
+
+
+@pytest.mark.parametrize("tool,kwargs", WRITE_TOOLS)
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"DG04": "Evening snack"},
+        {"DG04ON": "false"},
+        {"DG05": " BREAK FAST "},
+        {
+            "DG01": "Petit déjeuner",
+            "DG02": "Déjeuner",
+            "DG03": "Dîner",
+            "DG04": "Collations",
+        },
+        {f"DG{i:02}ON": "false" for i in range(1, 9)},
+    ],
+    ids=["missing", "disabled", "duplicate", "localized", "all-disabled"],
+)
+def test_auto_requires_all_four_unique_enabled_meals_before_writing(
+    tmp_path, monkeypatch, tool, kwargs, overrides
+):
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(
+        tmp_path, [profile(**{**BREAKFAST_FIRST, **overrides})]
+    )
+    monkeypatch.setattr(server, "_client", client)
+    monkeypatch.setattr(client, "now", lambda: datetime(2026, 11, 13, 8, tzinfo=UTC))
+    forms = capture_forms(client)
+
+    result = json.loads(getattr(server, tool)(**kwargs))
+
+    assert result["status"] == "error"
+    assert "Cannot resolve diary_group 'auto'" in result["message"]
+    assert "Choose an explicit diary_group" in result["message"]
+    for group in client._diary_groups:
+        if group["enabled"]:
+            assert group["name"] in result["message"]
+    assert state["post"] == 1
+    assert forms == []
+
+
+def test_auto_reuses_the_group_cache(tmp_path):
+    client, state = make_cold_client(tmp_path, [profile(**BREAKFAST_FIRST)])
+
+    client.resolve_diary_group("Breakfast")
+    assert client._auto_diary_group_for_hour(8) == 0
+    assert client._auto_diary_group_for_hour(12) == 1
+    assert state["post"] == 1
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"DG04": "Other"}, {"DG04ON": "false"}, {"DG05": "Lunch"}]
+)
+def test_auto_refreshes_an_unusable_cached_layout_once(tmp_path, overrides):
+    client, state = make_cold_client(
+        tmp_path,
+        [profile(**{**BREAKFAST_FIRST, **overrides}), profile(**BREAKFAST_FIRST)],
+    )
+    client.get_diary_groups()
+
+    assert client._auto_diary_group_for_hour(8) == 0
+    assert state["post"] == 2
+
+
+def test_auto_stops_after_one_refresh_of_an_unusable_layout(tmp_path):
+    client, state = make_cold_client(
+        tmp_path, [profile(**{**BREAKFAST_FIRST, "DG04": "Other"})]
+    )
+    client.get_diary_groups()
+
+    with pytest.raises(ValueError, match="Choose an explicit diary_group"):
+        client._auto_diary_group_for_hour(8)
+    assert state["post"] == 2
+
+
+@pytest.mark.parametrize("tool,kwargs", WRITE_TOOLS)
+def test_auto_profile_failure_does_not_write(tmp_path, monkeypatch, tool, kwargs):
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(tmp_path, [{}])
+    monkeypatch.setattr(server, "_client", client)
+    forms = capture_forms(client)
+
+    def unavailable():
+        raise RuntimeError("profile unavailable")
+
+    monkeypatch.setattr(client, "_get_profile_prefs", unavailable)
+
+    result = json.loads(getattr(server, tool)(**kwargs))
+
+    assert result["status"] == "error"
+    assert "profile unavailable" in result["message"]
+    assert state["post"] == 0
+    assert forms == []
 
 
 def test_add_food_entry_unknown_group_returns_an_error(tmp_path, monkeypatch):

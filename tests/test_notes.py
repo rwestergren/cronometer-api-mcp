@@ -119,7 +119,7 @@ def test_add_note_at_drives_the_auto_group(tmp_path):
     client.add_note("lunchish", DAY, at=dtime(12, 30))
 
     assert forms[0]["time"] == "12:30:00"
-    # 12:30 is Lunch, group 2 (see _meal_group_for_hour), not the 23:00 group.
+    # 12:30 is Lunch in the fallback layout, not the 23:00 Snacks group.
     assert forms[0]["order"] == str((2 << 16) | 1)
 
 

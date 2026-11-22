@@ -155,7 +155,7 @@ def _group_echo(group: dict) -> dict:
     Only for an explicitly named group: "auto" is chosen from the time of day
     inside the client, so there is nothing resolved to report.
     """
-    if group["group"] == 0:
+    if group["group"] is None:
         return {}
     return {"diary_group": group}
 
@@ -273,8 +273,8 @@ def get_diary_groups() -> str:
     `group` here is that number, so an entry with order 196609 is in group 3.
 
     Returns each group as {group, pref, name, enabled}, in diary order. Group 0
-    is where exercise and biometrics entries sit. A group with enabled=false is
-    hidden in the app, so no entries are expected there.
+    is a regular slot whose name depends on the account. A group with
+    enabled=false is hidden in the app but may still contain older entries.
     """
     try:
         client = _get_client()
@@ -335,8 +335,9 @@ def add_food_entry(
         translation_id: Translation ID from search results (usually 0).
         diary_group: Meal slot: "auto" (default, picks by time of day) or the
                      name of one of the account's diary groups, matched
-                     case-insensitively. Group names are customizable; call
-                     get_diary_groups to see them.
+                     ignoring case and whitespace. "auto" requires unique
+                     enabled Breakfast, Lunch, Dinner and Snacks groups;
+                     otherwise choose an explicit name from get_diary_groups.
         time: Time of day to log at, 24-hour HH:MM or HH:MM:SS in the account
               timezone (defaults to now). With diary_group "auto", this also
               picks the meal slot, so logging lunch late still lands in lunch.
@@ -418,7 +419,9 @@ def add_note(
         date: Date as YYYY-MM-DD (defaults to today).
         diary_group: Meal slot the note sits in: "auto" (default, picks by
             time of day) or the name of one of the account's diary groups,
-            matched case-insensitively (see get_diary_groups).
+            matched ignoring case and whitespace. "auto" requires unique
+            enabled Breakfast, Lunch, Dinner and Snacks groups; otherwise
+            choose an explicit name from get_diary_groups.
         time: Time of day for the note, 24-hour HH:MM or HH:MM:SS in the
             account timezone (defaults to now). With diary_group "auto", this
             also picks the meal slot.
@@ -1388,7 +1391,9 @@ def add_exercise(
         date: Date as YYYY-MM-DD (defaults to today).
         diary_group: Meal slot: "auto" (default, picks by time of day) or the
             name of one of the account's diary groups, matched
-            case-insensitively (see get_diary_groups).
+            ignoring case and whitespace. "auto" requires unique enabled
+            Breakfast, Lunch, Dinner and Snacks groups; otherwise choose an
+            explicit name from get_diary_groups.
     """
     try:
         client = _get_client()
