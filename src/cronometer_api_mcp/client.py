@@ -1694,8 +1694,8 @@ class CronometerClient:
             day: The day the serving is logged on. Defaults to today.
             grams: New weight in grams.
             measure_id: New display measure (grams stays the amount).
-            diary_group: New meal group, 1 = Breakfast, 2 = Lunch,
-                3 = Dinner, 4 = Snacks.
+            diary_group: New meal group number, as resolve_diary_group
+                returns it for one of the account's enabled groups.
 
         Returns the updated serving as sent.
         """
@@ -1703,8 +1703,10 @@ class CronometerClient:
             raise ValueError("update_serving needs grams, measure_id or diary_group")
         if grams is not None and grams <= 0:
             raise ValueError(f"grams must be positive, got {grams}")
-        if diary_group is not None and diary_group not in (1, 2, 3, 4):
-            raise ValueError(f"diary_group must be 1-4, got {diary_group}")
+        # Group numbers come from the account's layout (resolve_diary_group);
+        # they occupy the high 16 bits of `order`.
+        if diary_group is not None and not 0 <= diary_group <= 0xFFFF:
+            raise ValueError(f"diary_group must be 0-65535, got {diary_group}")
 
         entries = self.get_diary(day).get("diary", [])
         serving = next(

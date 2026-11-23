@@ -91,7 +91,8 @@ def test_update_serving_unknown_id_raises_without_editing(tmp_path):
     [
         ({}, "needs grams"),
         ({"grams": 0}, "positive"),
-        ({"diary_group": 5}, "1-4"),
+        ({"diary_group": -1}, "0-65535"),
+        ({"diary_group": 1 << 16}, "0-65535"),
     ],
 )
 def test_update_serving_validates_before_any_request(tmp_path, kwargs, message):
