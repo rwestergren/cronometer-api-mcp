@@ -134,6 +134,7 @@ cached session, so it also overrides a stale cached timezone.
 |------|-------------|
 | `get_diary_groups` | The account's diary groups (meal slots) and their names, for interpreting the group in each entry's `order` |
 | `add_food_entry` | Log a food serving to the diary, optionally at a given time of day |
+| `update_food_entry` | Change a logged entry's amount or measure, or move it to another diary group |
 | `remove_food_entry` | Remove one or more diary entries: foods, exercises, notes or biometrics |
 | `add_custom_food` | Create a custom food with specified nutrition and optional barcodes |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, serving size, or barcodes |

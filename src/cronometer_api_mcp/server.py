@@ -458,6 +458,50 @@ def add_food_entry(
         return _err(e)
 
 
+@mcp.tool(annotations=_WRITE_IDEMPOTENT)
+def update_food_entry(
+    entry_id: str,
+    date: str | None = None,
+    grams: float | None = None,
+    measure_id: int | None = None,
+    diary_group: str | None = None,
+) -> str:
+    """Change a logged food entry: its amount, its measure, or its meal.
+
+    Use get_food_log to find the entry ID. Pass only what should change.
+
+    Args:
+        entry_id: Serving/entry ID from get_food_log.
+        date: Date the entry is logged on as YYYY-MM-DD (defaults to today).
+        grams: New weight of the serving in grams.
+        measure_id: New measure/unit ID from get_food_details (the amount is
+            still given in grams).
+        diary_group: Move to another meal: the name of one of the account's
+            enabled diary groups (see get_diary_groups), matched ignoring case
+            and whitespace. "auto" is not accepted here.
+    """
+    try:
+        client = _get_client()
+        group = None
+        if diary_group is not None:
+            group = client.resolve_diary_group(diary_group)
+            if group["group"] is None:
+                raise ValueError(
+                    'diary_group "auto" cannot move an entry; name the target '
+                    "group (see get_diary_groups)."
+                )
+        entry = client.update_serving(
+            entry_id,
+            _parse_date(date),
+            grams=grams,
+            measure_id=measure_id,
+            diary_group=group["group"] if group else None,
+        )
+        return _ok({"entry": entry, **(_group_echo(group) if group else {})})
+    except Exception as e:
+        return _err(e)
+
+
 @mcp.tool(annotations=_DESTRUCTIVE)
 def remove_food_entry(
     entry_ids: list[str],
