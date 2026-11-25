@@ -473,7 +473,8 @@ def update_food_entry(
     Args:
         entry_id: Serving/entry ID from get_food_log.
         date: Date the entry is logged on as YYYY-MM-DD (defaults to today).
-        grams: New weight of the serving in grams.
+        grams: New weight of the serving in grams. Only supported for weight-based
+            foods and recipes; change serving-based recipe amounts in Cronometer.
         measure_id: New measure/unit ID from get_food_details (the amount is
             still given in grams).
         diary_group: Move to another meal: the name of one of the account's

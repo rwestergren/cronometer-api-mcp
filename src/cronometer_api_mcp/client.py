@@ -197,7 +197,8 @@ class CronometerClient:
     dispatches on worker threads. Auth state transitions are serialized (see
     `_auth_lock`), edits to a given custom food are serialized per food id
     (see `_food_lock`), and macro split reads/writes share `_macro_split_lock`.
-    Macro target updates share `_macro_targets_lock`.
+    Macro target updates share `_macro_targets_lock`, and diary serving edits
+    are serialized per serving id (see `_serving_lock`).
     """
 
     def __init__(self, *, session_path: Path | None = None) -> None:
@@ -216,6 +217,8 @@ class CronometerClient:
         # entire object. `_food_locks_guard` protects the lock registry.
         self._food_locks: dict[int, threading.Lock] = {}
         self._food_locks_guard = threading.Lock()
+        self._serving_locks: dict[str, threading.Lock] = {}
+        self._serving_locks_guard = threading.Lock()
         self._macro_targets_lock = threading.Lock()
         self._macro_split_lock = threading.Lock()
 
@@ -1670,6 +1673,15 @@ class CronometerClient:
         )
         return data
 
+    def _serving_lock(self, serving_id: str | int) -> threading.Lock:
+        """Serialize the fetch-modify-save cycle for one diary serving."""
+        key = str(serving_id)
+        with self._serving_locks_guard:
+            lock = self._serving_locks.get(key)
+            if lock is None:
+                lock = self._serving_locks[key] = threading.Lock()
+            return lock
+
     def update_serving(
         self,
         serving_id: str | int,
@@ -1692,7 +1704,8 @@ class CronometerClient:
         Args:
             serving_id: The servingId from get_diary.
             day: The day the serving is logged on. Defaults to today.
-            grams: New weight in grams.
+            grams: New weight in grams. Requires a weight-based food or recipe;
+                serving-based recipes store reference-serving counts instead.
             measure_id: New display measure (grams stays the amount).
             diary_group: New meal group number, as resolve_diary_group
                 returns it for one of the account's enabled groups.
@@ -1708,38 +1721,46 @@ class CronometerClient:
         if diary_group is not None and not 0 <= diary_group <= 0xFFFF:
             raise ValueError(f"diary_group must be 0-65535, got {diary_group}")
 
-        entries = self.get_diary(day).get("diary", [])
-        serving = next(
-            (e for e in entries if str(e.get("servingId")) == str(serving_id)),
-            None,
-        )
-        if serving is None:
-            raise CronometerError(
-                f"No serving {serving_id} in the diary for {self._format_day(day)}"
+        with self._serving_lock(serving_id):
+            entries = self.get_diary(day).get("diary", [])
+            serving = next(
+                (e for e in entries if str(e.get("servingId")) == str(serving_id)),
+                None,
             )
+            if serving is None:
+                raise CronometerError(
+                    f"No serving {serving_id} in the diary for {self._format_day(day)}"
+                )
 
-        serving = dict(serving)
-        if grams is not None:
-            serving["grams"] = grams
-        if measure_id is not None:
-            serving["measureId"] = measure_id
-        if diary_group is not None and serving.get("order", 0) >> 16 != diary_group:
-            last = max(
-                (
-                    e.get("order", 0) & 0xFFFF
-                    for e in entries
-                    if e.get("order", 0) >> 16 == diary_group
-                ),
-                default=0,
-            )
-            serving["order"] = (diary_group << 16) | (last + 1)
+            serving = dict(serving)
+            if grams is not None:
+                food = self.get_food(serving["foodId"])
+                if any(m.get("type") == "Recipe" for m in food.get("measures") or []):
+                    raise CronometerError(
+                        f"Serving {serving_id} is a serving-based recipe; grams updates "
+                        "require a weight-based food or recipe. Change this amount "
+                        "in Cronometer instead."
+                    )
+                serving["grams"] = grams
+            if measure_id is not None:
+                serving["measureId"] = measure_id
+            if diary_group is not None and serving.get("order", 0) >> 16 != diary_group:
+                last = max(
+                    (
+                        e.get("order", 0) & 0xFFFF
+                        for e in entries
+                        if e.get("order", 0) >> 16 == diary_group
+                    ),
+                    default=0,
+                )
+                serving["order"] = (diary_group << 16) | (last + 1)
 
-        payload = {"serving": serving, "config": {"call_version": 2}}
-        data = self._request("/api/v2/edit_serving", payload)
-        if str(data.get("id")) != str(serving["servingId"]):
-            raise CronometerError(f"Failed to update serving {serving_id}: {data}")
-        logger.info("Updated serving %s on %s", serving_id, serving.get("day"))
-        return serving
+            payload = {"serving": serving, "config": {"call_version": 2}}
+            data = self._request("/api/v2/edit_serving", payload)
+            if str(data.get("id")) != str(serving["servingId"]):
+                raise CronometerError(f"Failed to update serving {serving_id}: {data}")
+            logger.info("Updated serving %s on %s", serving_id, serving.get("day"))
+            return serving
 
     # ------------------------------------------------------------------
     # Diary: notes
