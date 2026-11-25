@@ -224,6 +224,31 @@ uv run cronometer-api-mcp
 
 The CLI auto-loads `.env` on startup (dev convenience only). Real environment variables always win over `.env`, so production deployments and MCP client `env` blocks are unaffected.
 
+### Releases
+
+Open **Actions → Release → Run workflow**, select **main**, and choose **patch**
+(default), **minor**, or **major**. CI must have passed for the selected commit;
+if it is still running, wait for it to finish before starting the release.
+
+The workflow increments the highest stable `vX.Y.Z` tag, tags the selected commit,
+and creates a GitHub Release with generated notes. Prerelease tags are ignored.
+For example, `v0.2.7` becomes `v0.2.8` for a patch or `v0.3.0` for a minor release.
+Release runs are serialized, and an already-released commit cannot be released again.
+
+The release workflow then dispatches **Publish to PyPI** (including the MCP Registry)
+and **Build Docker image** at the new tag. Check their separate runs for publishing
+completion; a successful Release run only confirms they were dispatched. Version
+fields in `pyproject.toml` and `server.json` are set from the tag during publishing.
+
+This uses the built-in `GITHUB_TOKEN` and existing OIDC publishing configuration;
+no PAT or GitHub App is needed. Explicit dispatch is necessary because releases
+created with `GITHUB_TOKEN` do not trigger `release: published` workflows.
+
+If dispatch or publishing fails, rerun the failed jobs in that workflow run rather
+than starting a new release. Existing PyPI uploads are skipped on retry so an MCP
+Registry failure can be retried. Manually published GitHub Releases also continue
+to trigger publishing.
+
 ## How It Works
 
 This server communicates with `mobile.cronometer.com` -- the same REST API used by the Cronometer Android/Flutter app. The API was reverse-engineered through:

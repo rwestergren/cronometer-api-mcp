@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        required: true
+        default: patch
+        options: [patch, minor, major]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Require main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases must run from the main branch."
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require successful CI for this commit
+        run: |
+          ci=$(gh run list --workflow ci.yml --branch main --commit "$GITHUB_SHA" \
+            --event push --limit 1 --json status,conclusion,url --jq '.[0] // {}')
+          if [[ "$(jq -r '.status' <<< "$ci")" != completed || \
+                "$(jq -r '.conclusion' <<< "$ci")" != success ]]; then
+            echo "::error::CI must pass for $GITHUB_SHA before releasing. $(jq -r '.url // empty' <<< "$ci")"
+            exit 1
+          fi
+
+      - name: Compute next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+          pattern = r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+          versions = [
+              tuple(map(int, match.groups()))
+              for tag in git("tag", "--list").splitlines()
+              if (match := re.fullmatch(pattern, tag))
+          ]
+          major, minor, patch = max(versions, default=(0, 0, 0))
+          latest = f"v{major}.{minor}.{patch}" if versions else ""
+          if latest:
+              sha = os.environ["GITHUB_SHA"]
+              if git("rev-parse", f"{latest}^{{commit}}") == sha:
+                  raise SystemExit("::error::This commit is already released. Retry the failed publishing run instead.")
+              if subprocess.run(["git", "merge-base", "--is-ancestor", latest, sha]).returncode:
+                  raise SystemExit("::error::The release commit must include the latest stable tag.")
+
+          match os.environ["BUMP"]:
+              case "major":
+                  version = (major + 1, 0, 0)
+              case "minor":
+                  version = (major, minor + 1, 0)
+              case "patch":
+                  version = (major, minor, patch + 1)
+              case _:
+                  raise SystemExit("::error::Expected a patch, minor, or major bump.")
+
+          tag = "v" + ".".join(map(str, version))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"tag={tag}\nlatest={latest}\n")
+          print(f"Next release: {tag}")
+          PY
+
+      - name: Create GitHub Release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: |
+          args=(--target "$GITHUB_SHA" --title "$TAG" --generate-notes)
+          if [[ -n "$LATEST" ]]; then
+            args+=(--notes-start-tag "$LATEST")
+          fi
+          gh release create "$TAG" "${args[@]}"
+          echo "Created [$TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG) at \`$GITHUB_SHA\`." >> "$GITHUB_STEP_SUMMARY"
+
+  dispatch:
+    name: Dispatch ${{ matrix.workflow }}
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: [publish.yml, docker.yml]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.release.outputs.tag }}
+      WORKFLOW: ${{ matrix.workflow }}
+
+    steps:
+      # GITHUB_TOKEN-created releases do not trigger release-event workflows.
+      - name: Start publishing at the release tag
+        run: |
+          gh workflow run "$WORKFLOW" --ref "$TAG"
+          echo "Dispatched [$WORKFLOW]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW?query=branch%3A$TAG) at \`$TAG\`. Check that workflow's run for publishing completion." >> "$GITHUB_STEP_SUMMARY"
