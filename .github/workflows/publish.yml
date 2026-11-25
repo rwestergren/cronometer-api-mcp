@@ -3,6 +3,7 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -14,6 +15,14 @@ jobs:
       contents: read
 
     steps:
+      - name: Require a release tag for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ ! "$GITHUB_REF" =~ ^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Dispatch publishing at a vX.Y.Z tag, not a branch."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Install uv
@@ -33,6 +42,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
       - name: Install mcp-publisher
         run: |
