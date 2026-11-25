@@ -731,3 +731,44 @@ def test_label_diary_groups_reuses_groups_cached_by_a_write(tmp_path):
 
     assert state["post"] == 1
     assert diary["diary"][0]["diary_group"]["name"] == "Dinner"
+
+
+# ------------------------------------------------------------------
+# update_food_entry resolves the target group from the account layout
+# ------------------------------------------------------------------
+
+
+def test_update_food_entry_moves_to_a_named_custom_group(tmp_path, monkeypatch):
+    from test_diary_edit import EDITED, diary, serving
+
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(
+        tmp_path, [profile(**CUSTOM_GROUPS), diary(serving()), EDITED]
+    )
+    monkeypatch.setattr(server, "_client", client)
+
+    result = json.loads(
+        server.update_food_entry(
+            entry_id=str(serving()["servingId"]),
+            date="1900-01-02",
+            diary_group="Pre-bedtime",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["diary_group"] == {"group": 5, "name": "Pre-bedtime"}
+    assert state["payloads"][-1]["serving"]["order"] >> 16 == 5
+
+
+def test_update_food_entry_refuses_auto_without_editing(tmp_path, monkeypatch):
+    from cronometer_api_mcp import server
+
+    client, state = make_cold_client(tmp_path, [])
+    monkeypatch.setattr(server, "_client", client)
+
+    result = json.loads(server.update_food_entry(entry_id="1", diary_group="auto"))
+
+    assert result["status"] == "error"
+    assert '"auto" cannot move an entry' in result["message"]
+    assert state["payloads"] == []

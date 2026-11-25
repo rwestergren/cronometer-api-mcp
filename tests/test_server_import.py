@@ -39,6 +39,7 @@ EXPECTED_TOOLS = {
     "search_foods",
     "set_macro_split",
     "update_custom_food",
+    "update_food_entry",
     "update_note",
     "update_recipe",
 }
