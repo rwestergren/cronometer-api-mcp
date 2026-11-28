@@ -63,7 +63,9 @@ mcp = MCPServer(
         "Cronometer MCP server for nutrition tracking via the mobile REST API. "
         "Provides access to food search, diary management, daily nutrition data, "
         "macro targets, biometrics, and fasting history from Cronometer. "
-        "Use search_foods to find foods, get_food_details for nutrition info "
+        "Use get_recent_foods or get_frequent_foods to find remembered foods for "
+        "'my usual' requests; fall back to search_foods when none fits. "
+        "Use get_food_details for nutrition info "
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
         "review what was eaten. For relative-date questions, prefer relative inputs "
         "(today, yesterday, N days ago) in get_food_log, get_daily_nutrition, and "
@@ -415,13 +417,15 @@ def add_food_entry(
 ) -> str:
     """Add a food entry to the Cronometer diary.
 
-    Use search_foods to find food_id and measure_id, then
-    get_food_details to confirm serving sizes and gram weights.
+    For remembered foods, reuse food_id and reference_serving's measure_id,
+    translation_id, and grams from get_recent_foods or get_frequent_foods.
+    Otherwise use search_foods and get_food_details to resolve a serving.
 
     Args:
-        food_id: Numeric food ID from search_foods results.
-        measure_id: Measure/unit ID from get_food_details.
-        grams: Weight of the serving in grams.
+        food_id: Numeric food ID from food search or remembered-food results.
+        measure_id: Measure/unit ID from food details or reference_serving.
+        grams: Weight in grams, or a reference-serving count for Recipe measures.
+               Reuse a remembered serving's value unchanged to repeat its amount.
         date: Date to log as YYYY-MM-DD (defaults to today).
         translation_id: Translation ID from search results (usually 0).
         diary_group: Meal slot: "auto" (default, picks by time of day) or the
@@ -729,6 +733,131 @@ def get_nutrition_scores(date: str | None = None) -> str:
 # ------------------------------------------------------------------
 # Food search and details
 # ------------------------------------------------------------------
+
+
+def _remembered_foods(
+    sort: Literal["recent", "frequent"], query: str | None, limit: int
+) -> dict:
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("limit must be an integer between 1 and 50.")
+    client = _get_client()
+    rows = (
+        client.get_recent_foods() if sort == "recent" else client.get_frequent_foods()
+    )
+    available_count = len(rows)
+    if query:
+        needle = query.strip().casefold()
+        rows = [
+            row for row in rows if needle in (row["food"].get("name") or "").casefold()
+        ]
+
+    foods = []
+    for row in rows[:limit]:
+        food = row["food"]
+        serving = row["serving"]
+        measure = next(
+            (
+                m
+                for m in food.get("measures", [])
+                if m.get("id") == serving.get("measureId")
+            ),
+            None,
+        )
+        order = serving.get("order")
+        group = order >> 16 if type(order) is int and order >= 0 else None
+        foods.append(
+            {
+                "food_id": food.get("id"),
+                "name": food.get("name"),
+                "source": food.get("source"),
+                "retired": food.get("retired"),
+                "recent_count": row["count"],
+                "reference_serving": {
+                    "measure_id": serving.get("measureId"),
+                    "translation_id": serving.get("translationId"),
+                    "grams": serving.get("grams"),
+                    "measure": {
+                        "name": measure.get("name"),
+                        "type": measure.get("type"),
+                        "quantity": measure.get("amount"),
+                        "value": measure.get("value"),
+                    }
+                    if measure is not None
+                    else None,
+                    "date": serving.get("day"),
+                    "time": serving.get("time"),
+                    "diary_group_number": group,
+                },
+            }
+        )
+    return {
+        "sort": sort,
+        "query": query,
+        "available_count": available_count,
+        "count": len(foods),
+        "foods": foods,
+    }
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_recent_foods(
+    query: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+) -> str:
+    """Find remembered foods in Cronometer's Most Recent order.
+
+    Prefer this for "my usual X"; fall back to search_foods if nothing fits.
+    Reverses the native response rather than sorting diary dates. The native
+    list is limited (observed 50 foods), with no date window or pagination.
+
+    Each food has recent_count (a ranking counter, not an exact use total)
+    and reference_serving. Its IDs and grams can be reused with add_food_entry;
+    the reference is not necessarily the latest existing or most common entry.
+    Recipe measures use reference-serving counts in grams, not gram weights.
+    measure contains the selected measure's name/type/quantity and native value;
+    null means unresolved: use get_food_details. Resolve diary_group_number to
+    an enabled name with get_diary_groups when reusing the meal slot.
+
+    Args:
+        query: Optional case-insensitive name substring, filtered before limit.
+        limit: Maximum results, 1–50 (default 50). Applies to the native list only.
+
+    Returns foods, count, and available_count (native size before filtering).
+    """
+    try:
+        return _ok(_remembered_foods("recent", query, limit))
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_frequent_foods(
+    query: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+) -> str:
+    """Find remembered foods ranked by Cronometer's frequency counter.
+
+    Uses the same native candidate list as get_recent_foods (observed 50 foods),
+    sorted by descending recent_count; ties retain recent order. Counts are
+    ranking signals, not lifetime or N-day diary totals. No date window or
+    pagination is available. Fall back to search_foods if nothing fits.
+
+    Each food includes reference_serving's IDs, grams, selected measure, date,
+    time, and diary_group_number. Reuse the IDs and grams with add_food_entry;
+    Recipe measures use reference-serving counts in grams, not gram weights.
+    References may be stale and are not computed usual amounts. A null measure
+    needs get_food_details; use get_diary_groups to resolve a meal group name.
+
+    Args:
+        query: Optional case-insensitive name substring, filtered before limit.
+        limit: Maximum results, 1–50 (default 50). Applies to the native list only.
+
+    Returns foods, count, and available_count (native size before filtering).
+    """
+    try:
+        return _ok(_remembered_foods("frequent", query, limit))
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool(annotations=_READ_ONLY)
