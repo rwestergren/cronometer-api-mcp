@@ -127,6 +127,8 @@ cached session, so it also overrides a stale cached timezone.
 |------|-------------|
 | `search_foods` | Search the Cronometer food database by name |
 | `get_food_details` | Full nutrition profile and serving sizes for a food |
+| `get_recent_foods` | List remembered foods and their servings in the app's Most Recent order |
+| `get_frequent_foods` | Rank the same foods by Cronometer's frequency counter |
 
 ### Diary Management
 

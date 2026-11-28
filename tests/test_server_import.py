@@ -28,9 +28,11 @@ EXPECTED_TOOLS = {
     "get_fasting_stats",
     "get_food_details",
     "get_food_log",
+    "get_frequent_foods",
     "get_macro_targets",
     "set_macro_targets",
     "get_nutrition_scores",
+    "get_recent_foods",
     "import_recipe",
     "list_biometrics",
     "mark_day_complete",
@@ -100,6 +102,8 @@ def test_tool_annotations_reach_wire_model():
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
     assert tools["get_food_log"].annotations.read_only_hint is True
+    assert tools["get_recent_foods"].annotations.read_only_hint is True
+    assert tools["get_frequent_foods"].annotations.read_only_hint is True
     assert tools["add_food_entry"].annotations.read_only_hint is False
     assert tools["delete_custom_food"].annotations.destructive_hint is True
     assert tools["delete_recipe"].annotations.destructive_hint is True

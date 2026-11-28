@@ -654,6 +654,29 @@ class CronometerClient:
         logger.info("Food search for %r returned %d results", query, len(foods))
         return foods
 
+    def get_recent_foods(self) -> list[dict]:
+        """Remembered foods in the app's recent order, with food/serving/count.
+
+        The native list has an observed limit of 50 and no date-range or
+        pagination arguments. References can outlive their diary entries.
+        """
+        data = self._request(
+            "/api/v2/get_recent_foods", {"config": {"call_version": 1}}
+        )
+        rows = data.get("servings", [])
+        logger.info("Fetched %d remembered foods", len(rows))
+        # The app reverses the response; diary dates can be backdated.
+        return list(reversed(rows))
+
+    def get_frequent_foods(self) -> list[dict]:
+        """The same remembered foods ranked by Cronometer's frequency counter.
+
+        Counts are ranking signals, not diary totals. Ties retain recent order.
+        """
+        return sorted(
+            self.get_recent_foods(), key=lambda row: row["count"], reverse=True
+        )
+
     # ------------------------------------------------------------------
     # Food details
     # ------------------------------------------------------------------
@@ -1624,7 +1647,7 @@ class CronometerClient:
                         (measureId field) or get_food() (defaultMeasureId or measures[].id).
                         0 is only valid for user-created custom foods; database-sourced
                         foods (CRDB/NCCDB/FDC) require a real measure ID.
-            grams: Weight in grams.
+            grams: Weight in grams, or a reference-serving count for Recipe measures.
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
             diary_group: Group number from get_diary_groups, including 0.
